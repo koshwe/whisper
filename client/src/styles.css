@@ -177,9 +177,11 @@ button { cursor: pointer; }
 .message-row.in .folder-replies .react-tools .react-row { left: 0; right: auto; }
 .message-row.out .folder-replies .react-tools .react-row { left: auto; right: 0; }
 .react-row button { border: 0; background: transparent; font-size: 18px; line-height: 1; padding: 4px; border-radius: 8px; }
+.react-more { color: var(--muted); font-size: 16px; font-weight: 700; width: 28px; }
+.react-row input { width: 32px; border: 0; background: transparent; font-size: 18px; text-align: center; padding: 0; }
 .react-row button.on, .react-row button:hover { background: rgba(255, 255, 255, 0.08); }
 .reaction-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 0; flex: none; max-width: 96px; }
-.reaction-chips button { border: 0; border-radius: 999px; background: rgba(0, 0, 0, 0.2); color: inherit; font-size: 13px; padding: 2px 7px; }
+.reaction-chips button { border: 0; border-radius: 999px; background: rgba(0, 0, 0, 0.2); color: inherit; font-size: 17px; padding: 2px 7px; }
 .reaction-chips button.mine { outline: 1px solid var(--accent); }
 .forwarded-label { margin: 0 0 4px; font-size: 12px; font-style: italic; color: rgba(232, 246, 239, 0.75); }
 .quote, .reply-chip {

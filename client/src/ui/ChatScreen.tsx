@@ -83,6 +83,12 @@ type ChatScreenProps = {
 
 const REACTION_EMOJI = ["👍", "❤️", "😂", "😮", "😢", "🙏", "🔥", "🎉"];
 
+function singleEmoji(value: string) {
+  if (!value.trim() || typeof Intl.Segmenter !== "function") return "";
+  const parts = [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(value)].map((part) => part.segment);
+  return [...parts].reverse().find((part) => /\p{Extended_Pictographic}/u.test(part)) ?? "";
+}
+
 function reactionGroups(reactions: MessageReaction[]) {
   const groups: Array<{ emoji: string; userIds: string[] }> = [];
   for (const reaction of reactions) {
@@ -437,6 +443,8 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
   const [chatSearching, setChatSearching] = useState(false);
   const [actionMenu, setActionMenu] = useState<string | null>(null);
   const [reactMenu, setReactMenu] = useState<string | null>(null);
+  const [emojiPick, setEmojiPick] = useState("");
+  const [emojiDraft, setEmojiDraft] = useState("");
   const [copiedNonce, setCopiedNonce] = useState<string | null>(null);
   const [dialog, setDialog] = useState<null | "new" | "safety" | "profile" | "reset" | "password" | "forward" | "delete" | "group" | "people">(null);
   const [deleteTarget, setDeleteTarget] = useState<ChatMessage | null>(null);
@@ -891,6 +899,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     const close = () => {
       setActionMenu(null);
       setReactMenu(null);
+      setEmojiPick("");
     };
     window.addEventListener("pointerdown", close);
     return () => window.removeEventListener("pointerdown", close);
@@ -914,6 +923,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     setForwardNote("");
     setActionMenu(null);
     setReactMenu(null);
+    setEmojiPick("");
     setMobileThread(true);
     setSendError("");
     setPhotoFile(null);
@@ -2203,6 +2213,35 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                                   {emoji}
                                 </button>
                               ))}
+                              <button
+                                type="button"
+                                className="react-more"
+                                aria-label="Another emoji"
+                                aria-expanded={emojiPick === message.nonce}
+                                onClick={() => {
+                                  setEmojiDraft("");
+                                  setEmojiPick((current) => (current === message.nonce ? "" : message.nonce));
+                                }}
+                              >
+                                +
+                              </button>
+                              {emojiPick === message.nonce && (
+                                <input
+                                  value={emojiDraft}
+                                  aria-label="Type an emoji"
+                                  autoFocus
+                                  onChange={(event) => {
+                                    const emoji = singleEmoji(event.target.value);
+                                    if (!emoji) {
+                                      setEmojiDraft(event.target.value.slice(0, 16));
+                                      return;
+                                    }
+                                    setEmojiDraft("");
+                                    setEmojiPick("");
+                                    void reactTo(message, emoji);
+                                  }}
+                                />
+                              )}
                             </span>
                           )}
                         </span>

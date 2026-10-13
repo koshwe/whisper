@@ -743,7 +743,13 @@ export function registerRoutes(app: Express, db: WhisperDb, filesDir: string) {
     }),
   );
 
-  const reactionEmoji = new Set(["👍", "❤️", "😂", "😮", "😢", "🙏", "🔥", "🎉"]);
+  function singleEmoji(value: string) {
+    const trimmed = value.trim();
+    if (!trimmed || typeof Intl.Segmenter !== "function") return "";
+    const parts = [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(trimmed)].map((part) => part.segment);
+    const emoji = parts.length === 1 ? parts[0] : "";
+    return emoji && /\p{Extended_Pictographic}/u.test(emoji) ? emoji : "";
+  }
 
   app.post(
     "/api/conversations/:id/messages/:messageId/react",
@@ -754,7 +760,7 @@ export function registerRoutes(app: Express, db: WhisperDb, filesDir: string) {
       if (!conversation) throw new HttpError(404, "Chat not found.");
       const raw = (req.body as { emoji?: unknown }).emoji;
       const emoji = raw === null ? null : typeof raw === "string" ? raw : undefined;
-      if (emoji === undefined || (emoji !== null && !reactionEmoji.has(emoji))) {
+      if (emoji === undefined || (emoji !== null && !singleEmoji(emoji))) {
         throw new HttpError(400, "Choose an emoji.");
       }
       const saved = db.setReaction(conversationId, req.params.messageId, user.id, emoji);

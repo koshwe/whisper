@@ -143,6 +143,18 @@ test("relays ciphertext and leaves the server unable to read it", async () => {
     });
     const reactedBody = (await reactedList.json()) as { messages: Array<{ id: string; reactions: Array<{ userId: string; emoji: string }> }> };
     assert.deepEqual(reactedBody.messages.find((message) => message.id === stored.id)?.reactions, [{ userId: bob.user.id, emoji: "👍" }]);
+    const customReaction = await fetch(`${base}/api/conversations/${conversationId}/messages/${stored.id}/react`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${bob.token}` },
+      body: JSON.stringify({ emoji: "⭐" }),
+    });
+    assert.equal(customReaction.status, 200);
+    const rejectedReaction = await fetch(`${base}/api/conversations/${conversationId}/messages/${stored.id}/react`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${alice.token}` },
+      body: JSON.stringify({ emoji: "hello" }),
+    });
+    assert.equal(rejectedReaction.status, 400);
     const clearedReaction = await fetch(`${base}/api/conversations/${conversationId}/messages/${stored.id}/react`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${bob.token}` },
