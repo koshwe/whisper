@@ -19,13 +19,13 @@ import {
 } from "@whisper/shared";
 import {
   confirmPassword,
+  changePassword as changePasswordRequest,
   createGroup,
   addGroupMember,
   leaveGroup,
   downloadAttachment,
   listConversations,
   listMessages,
-  listUsers,
   markRead,
   openConversation,
   resetKeys as resetKeysRequest,
@@ -34,14 +34,21 @@ import {
   editMessage,
   deleteMessage,
   setCollectsReplies,
+  setReaction,
   uploadAttachment,
   type Account,
   type Conversation,
-  type PublicUser,
+  type MessageReaction,
   type ServerMessage,
 } from "../api";
 import { saveIdentity } from "../idb";
 import { PhotoEditor } from "./PhotoEditor";
+
+type SearchHit = {
+  conversationId: string;
+  nonce: string;
+  snippet: string;
+};
 
 type ChatMessage = ServerMessage & {
   text: string;
@@ -62,6 +69,7 @@ type WsEvent =
   | { type: "edit"; message: ServerMessage }
   | { type: "delete"; conversationId: string; messageId: string; nonce: string; senderId: string; lastMessageAt: string | null; unreadCount?: number }
   | { type: "collect"; conversationId: string; messageId: string; nonce: string; collects: boolean }
+  | { type: "react"; conversationId: string; messageId: string; nonce: string; reactions: MessageReaction[] }
   | { type: "conversation"; conversation: Conversation }
   | { type: "removed"; conversationId: string }
   | { type: "keys"; userId: string; ecdhPublic: string; ecdsaPublic: string };
@@ -73,25 +81,90 @@ type ChatScreenProps = {
   onAccount: (account: Account, identity: Identity) => void;
 };
 
+const REACTION_EMOJI = ["👍", "❤️", "😂", "😮", "😢", "🙏", "🔥", "🎉"];
+
+function reactionGroups(reactions: MessageReaction[]) {
+  const groups: Array<{ emoji: string; userIds: string[] }> = [];
+  for (const reaction of reactions) {
+    const group = groups.find((item) => item.emoji === reaction.emoji);
+    if (group) group.userIds.push(reaction.userId);
+    else groups.push({ emoji: reaction.emoji, userIds: [reaction.userId] });
+  }
+  return groups;
+}
+
 function chatTitle(conversation: Conversation) {
   return conversation.kind === "group" ? conversation.title || "Group" : conversation.peer?.displayName || "Chat";
 }
 
-function matchesChat(conversation: Conversation, query: string) {
+function searchSnippet(text: string, needle: string) {
+  const clean = text.replace(/\s+/g, " ").trim();
+  const at = clean.toLowerCase().indexOf(needle);
+  if (at < 0) return clean.slice(0, 80);
+  const start = Math.max(0, at - 24);
+  const end = at + needle.length + 36;
+  return `${start > 0 ? "…" : ""}${clean.slice(start, end)}${end < clean.length ? "…" : ""}`;
+}
+
+function queryWords(query: string) {
+  return query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+}
+
+function textMatches(haystack: string, query: string, phrase: boolean) {
   const needle = query.trim().toLowerCase();
   if (!needle) return true;
+  const value = haystack.toLowerCase();
+  if (phrase) return value.includes(needle);
+  return queryWords(needle).every((word) => value.includes(word));
+}
+
+function chatFields(conversation: Conversation) {
   if (conversation.kind === "group") {
-    return (
-      chatTitle(conversation).toLowerCase().includes(needle) ||
-      conversation.members.some(
-        (member) => member.username.includes(needle) || member.displayName.toLowerCase().includes(needle),
-      )
-    );
+    return [chatTitle(conversation), ...conversation.members.flatMap((member) => [member.displayName, member.username])].join(" ");
   }
-  return Boolean(
-    conversation.peer &&
-      (conversation.peer.displayName.toLowerCase().includes(needle) || conversation.peer.username.includes(needle)),
-  );
+  return `${conversation.peer?.displayName ?? ""} ${conversation.peer?.username ?? ""}`;
+}
+
+function matchesChat(conversation: Conversation, query: string, phrase = false) {
+  return textMatches(chatFields(conversation), query, phrase);
+}
+
+async function searchConversations(
+  conversations: Conversation[],
+  query: string,
+  phrase: boolean,
+  identity: Identity,
+  userId: string,
+  isCancelled: () => boolean,
+) {
+  const needle = query.trim().toLowerCase();
+  const found: SearchHit[] = [];
+  for (const conversation of conversations) {
+    if (isCancelled() || found.length >= 40) break;
+    let before: string | undefined;
+    for (let pageNumber = 0; pageNumber < 15 && found.length < 40; pageNumber += 1) {
+      const page = await listMessages(conversation.id, before);
+      if (isCancelled()) return found;
+      for (const message of page.messages) {
+        const revealed = await revealMessage(message, conversation, identity, userId);
+        const haystack = `${revealed.text}\n${previewText(revealed)}`;
+        if (!textMatches(haystack, query, phrase)) continue;
+        const focus = phrase
+          ? needle
+          : queryWords(query).find((word) => haystack.toLowerCase().includes(word)) ?? needle;
+        found.push({
+          conversationId: conversation.id,
+          nonce: revealed.nonce,
+          snippet: searchSnippet(previewText(revealed) || revealed.text, focus),
+        });
+        if (found.length >= 40) break;
+      }
+      const oldest = page.messages[0];
+      if (!page.hasMore || !oldest) break;
+      before = oldest.createdAt;
+    }
+  }
+  return found;
 }
 
 function personName(conversation: Conversation, senderId: string, mine: string) {
@@ -159,6 +232,7 @@ function mergeMessage(list: ChatMessage[], incoming: ChatMessage) {
     reply: keepPrevious ? previous.reply : incoming.reply,
     forwarded: keepPrevious ? previous.forwarded : incoming.forwarded,
     collectsReplies: keepPrevious ? previous.collectsReplies : incoming.collectsReplies,
+    reactions: keepPrevious ? previous.reactions : incoming.reactions ?? previous.reactions ?? [],
     editedAt: keepPrevious ? previous.editedAt : incoming.editedAt,
     localUrl: incoming.localUrl ?? previous.localUrl,
     failed: incoming.failed && !previous.text && !previous.file,
@@ -351,8 +425,20 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
   const [forwardError, setForwardError] = useState("");
   const [forwarding, setForwarding] = useState(false);
   const [forwardNote, setForwardNote] = useState("");
-  const [filter, setFilter] = useState("");
-  const [dialog, setDialog] = useState<null | "new" | "safety" | "profile" | "reset" | "forward" | "delete" | "group" | "people">(null);
+  const [userQuery, setUserQuery] = useState("");
+  const [userPhrase, setUserPhrase] = useState(false);
+  const [wordQuery, setWordQuery] = useState("");
+  const [wordPhrase, setWordPhrase] = useState(false);
+  const [hits, setHits] = useState<SearchHit[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [chatQuery, setChatQuery] = useState("");
+  const [chatPhrase, setChatPhrase] = useState(false);
+  const [chatHits, setChatHits] = useState<SearchHit[]>([]);
+  const [chatSearching, setChatSearching] = useState(false);
+  const [actionMenu, setActionMenu] = useState<string | null>(null);
+  const [reactMenu, setReactMenu] = useState<string | null>(null);
+  const [copiedNonce, setCopiedNonce] = useState<string | null>(null);
+  const [dialog, setDialog] = useState<null | "new" | "safety" | "profile" | "reset" | "password" | "forward" | "delete" | "group" | "people">(null);
   const [deleteTarget, setDeleteTarget] = useState<ChatMessage | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
@@ -366,9 +452,9 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [safety, setSafety] = useState<string[]>([]);
   const [fingerprint, setFingerprint] = useState<string[]>([]);
+  const [showFingerprint, setShowFingerprint] = useState(false);
   const [lookup, setLookup] = useState("");
   const [lookupError, setLookupError] = useState("");
-  const [directory, setDirectory] = useState<PublicUser[]>([]);
   const [groupTitle, setGroupTitle] = useState("");
   const [groupUser, setGroupUser] = useState("");
   const [groupMembers, setGroupMembers] = useState<string[]>([]);
@@ -379,6 +465,11 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
   const [resetUnderstood, setResetUnderstood] = useState(false);
   const [resetError, setResetError] = useState("");
   const [resetBusy, setResetBusy] = useState(false);
+  const [passwordCurrent, setPasswordCurrent] = useState("");
+  const [passwordNext, setPasswordNext] = useState("");
+  const [passwordConfirm, setPasswordConfirm] = useState("");
+  const [passwordError, setPasswordError] = useState("");
+  const [passwordBusy, setPasswordBusy] = useState(false);
 
   const conversationsRef = useRef(conversations);
   const messagesRef = useRef(messages);
@@ -468,21 +559,6 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
       cancelled = true;
     };
   }, [identity, user.id]);
-
-  useEffect(() => {
-    if (dialog !== "new") return;
-    let cancelled = false;
-    listUsers()
-      .then(({ users }) => {
-        if (!cancelled) setDirectory(users);
-      })
-      .catch(() => {
-        if (!cancelled) setDirectory([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [dialog]);
 
   useEffect(() => {
     const peerKey = active?.peer?.ecdsaPublic;
@@ -697,6 +773,15 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
       }
       return;
     }
+    if (event.type === "react") {
+      setMessages((current) => ({
+        ...current,
+        [event.conversationId]: (current[event.conversationId] ?? []).map((item) =>
+          item.id === event.messageId || item.nonce === event.nonce ? { ...item, reactions: event.reactions } : item,
+        ),
+      }));
+      return;
+    }
     if (event.type === "collect") {
       setMessages((current) => ({
         ...current,
@@ -801,6 +886,16 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     return () => window.removeEventListener("focus", onFocus);
   }, [user.id]);
 
+  useEffect(() => {
+    if (!actionMenu && !reactMenu) return;
+    const close = () => {
+      setActionMenu(null);
+      setReactMenu(null);
+    };
+    window.addEventListener("pointerdown", close);
+    return () => window.removeEventListener("pointerdown", close);
+  }, [actionMenu, reactMenu]);
+
   function selectConversation(conversation: Conversation) {
     if (activeId) {
       draftsRef.current[activeId] = draft;
@@ -817,6 +912,8 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     setReplyTo(repliesRef.current[conversation.id] ?? null);
     setEditingId(editingIdsRef.current[conversation.id] ?? null);
     setForwardNote("");
+    setActionMenu(null);
+    setReactMenu(null);
     setMobileThread(true);
     setSendError("");
     setPhotoFile(null);
@@ -1073,6 +1170,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
         forwarded: false,
         collectsReplies: false,
         editedAt: null,
+        reactions: [],
         localUrl,
         failed: false,
         pending: true,
@@ -1313,6 +1411,27 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     updateDraft(stash?.draft ?? "");
   }
 
+  async function copyMessage(message: ChatMessage) {
+    const text = message.text.trim() || (message.file ? fileLabel(message.file) : "");
+    if (!text) return;
+    setActionMenu(null);
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const area = document.createElement("textarea");
+      area.value = text;
+      area.setAttribute("readonly", "");
+      area.style.position = "fixed";
+      area.style.left = "-9999px";
+      document.body.appendChild(area);
+      area.select();
+      document.execCommand("copy");
+      area.remove();
+    }
+    setCopiedNonce(message.nonce);
+    window.setTimeout(() => setCopiedNonce((current) => (current === message.nonce ? null : current)), 1500);
+  }
+
   function beginReply(message: ChatMessage) {
     if (editingId) cancelEdit();
     if (!active || message.failed || (!message.text.trim() && !message.file)) return;
@@ -1339,6 +1458,33 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     setDeleteTarget(message);
     setDeleteError("");
     setDialog("delete");
+  }
+
+  async function reactTo(message: ChatMessage, emoji: string) {
+    if (message.pending || message.id.startsWith("local:") || !active) return;
+    setActionMenu(null);
+    setReactMenu(null);
+    const mine = (message.reactions ?? []).find((reaction) => reaction.userId === user.id);
+    const next = mine?.emoji === emoji ? null : emoji;
+    const previous = message.reactions ?? [];
+    const optimistic = next
+      ? [...previous.filter((reaction) => reaction.userId !== user.id), { userId: user.id, emoji: next }]
+      : previous.filter((reaction) => reaction.userId !== user.id);
+    const apply = (reactions: MessageReaction[]) => {
+      setMessages((current) => ({
+        ...current,
+        [message.conversationId]: (current[message.conversationId] ?? []).map((item) =>
+          item.nonce === message.nonce ? { ...item, reactions } : item,
+        ),
+      }));
+    };
+    apply(optimistic);
+    try {
+      const saved = await setReaction(message.conversationId, message.id, next);
+      apply(saved.reactions);
+    } catch {
+      apply(previous);
+    }
   }
 
   async function toggleCollect(message: ChatMessage) {
@@ -1515,6 +1661,39 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     selectConversation(conversation);
   }
 
+  async function changePassword(event: FormEvent) {
+    event.preventDefault();
+    if (passwordNext.length < 8) {
+      setPasswordError("Use at least 8 characters.");
+      return;
+    }
+    if (passwordNext !== passwordConfirm) {
+      setPasswordError("Those passwords don't match.");
+      return;
+    }
+    if (passwordNext === passwordCurrent) {
+      setPasswordError("Choose a different password.");
+      return;
+    }
+    setPasswordBusy(true);
+    setPasswordError("");
+    try {
+      const authVerifier = await deriveAuthVerifier(user.username, passwordCurrent);
+      const nextAuthVerifier = await deriveAuthVerifier(user.username, passwordNext);
+      const wrapped = await wrapIdentity(identity, passwordNext);
+      const saved = await changePasswordRequest({ ...wrapped, authVerifier, nextAuthVerifier });
+      onAccount(saved.user, identity);
+      setDialog(null);
+      setPasswordCurrent("");
+      setPasswordNext("");
+      setPasswordConfirm("");
+    } catch (error) {
+      setPasswordError(error instanceof Error ? error.message : "Couldn't change the password.");
+    } finally {
+      setPasswordBusy(false);
+    }
+  }
+
   async function replaceKeys(event: FormEvent) {
     event.preventDefault();
     if (resetSecret.length < 8) {
@@ -1626,30 +1805,141 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     }
   }
 
-  const visible = conversations.filter((conversation) => matchesChat(conversation, filter));
+  async function openHit(hit: SearchHit) {
+    const conversation = conversationsRef.current.find((item) => item.id === hit.conversationId);
+    if (!conversation) return;
+    selectConversation(conversation);
+    let items = messagesRef.current[conversation.id] ?? [];
+    if (items.length === 0) {
+      try {
+        items = await ensureMessages(conversation);
+      } catch {
+        return;
+      }
+    }
+    let guard = 0;
+    while (!items.some((item) => item.nonce === hit.nonce) && guard < 15) {
+      const oldest = items[0];
+      if (!oldest) break;
+      const page = await listMessages(conversation.id, oldest.createdAt);
+      if (page.messages.length === 0) break;
+      const revealed = await Promise.all(
+        page.messages.map((message) => revealMessage(message, conversation, identityRef.current, user.id)),
+      );
+      const merged = [...revealed];
+      for (const item of items) {
+        if (!merged.some((message) => message.nonce === item.nonce)) merged.push(item);
+      }
+      merged.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      items = merged;
+      setMessages((current) => ({ ...current, [conversation.id]: merged }));
+      setHasMore((current) => ({ ...current, [conversation.id]: page.hasMore }));
+      if (!page.hasMore) break;
+      guard += 1;
+    }
+    const byNonce = new Map(items.map((item) => [item.nonce, item]));
+    const message = byNonce.get(hit.nonce);
+    if (message) {
+      const collector = collectorNonce(message, byNonce);
+      if (collector) setOpenFolders((current) => ({ ...current, [collector]: true }));
+    }
+    window.setTimeout(() => focusQuoted(hit.nonce), 80);
+  }
+
+  useEffect(() => {
+    const needle = wordQuery.trim().toLowerCase();
+    if (!needle) {
+      setHits([]);
+      setSearching(false);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      setSearching(true);
+      void searchConversations(conversationsRef.current, wordQuery, wordPhrase, identityRef.current, user.id, () => cancelled)
+        .then((found) => {
+          if (!cancelled) {
+            setHits(found);
+            setSearching(false);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) setSearching(false);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [wordQuery, wordPhrase, conversations, user.id]);
+
+  useEffect(() => {
+    const needle = chatQuery.trim().toLowerCase();
+    const conversationId = activeId;
+    if (!needle || !conversationId) {
+      setChatHits([]);
+      setChatSearching(false);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      const conversation = conversationsRef.current.find((item) => item.id === conversationId);
+      if (!conversation) {
+        if (!cancelled) {
+          setChatHits([]);
+          setChatSearching(false);
+        }
+        return;
+      }
+      setChatSearching(true);
+      void searchConversations([conversation], chatQuery, chatPhrase, identityRef.current, user.id, () => cancelled)
+        .then((found) => {
+          if (!cancelled) {
+            setChatHits(found);
+            setChatSearching(false);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) setChatSearching(false);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [chatQuery, chatPhrase, activeId, user.id]);
+
+  const visible = conversations.filter((conversation) => matchesChat(conversation, userQuery, userPhrase));
+  const userLookup = userQuery.trim();
+  const wordLookup = wordQuery.trim();
 
   return (
     <main className={mobileThread ? "app-shell thread-open" : "app-shell"}>
       <aside className="sidebar">
         <header className="side-head">
-          <button type="button" className="you" onClick={() => setDialog("profile")}>
+          <button type="button" className="you" onClick={() => { setShowFingerprint(false); setDialog("profile"); }}>
             <Avatar name={user.displayName} username={user.username} />
             <span>
               <strong>{user.displayName}</strong>
               <small>@{user.username}</small>
             </span>
           </button>
-          <button type="button" className="icon-button" aria-label="New chat" onClick={() => { setDialog("new"); setLookupError(""); }}>
-            +
+          <button type="button" className="text add-chat" onClick={() => { setDialog("new"); setLookupError(""); }}>
+            Add new chat
           </button>
         </header>
-        <label className="side-search">
-          <span className="sr">Search chats</span>
-          <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Search chats" />
-        </label>
+        <div className="side-search">
+          <label className="search-line">
+            <input value={userQuery} onChange={(event) => setUserQuery(event.target.value)} placeholder="Name or username" aria-label="Name or username" />
+            <button type="button" className={userPhrase ? "phrase on" : "phrase"} aria-pressed={userPhrase} onClick={() => setUserPhrase((current) => !current)}>
+              Search
+            </button>
+          </label>
+        </div>
         {listError && <p className="error inset">{listError}</p>}
         <div className="chat-list">
-          {visible.length === 0 && <p className="empty-list">No chats yet. Start one with a username.</p>}
+          {!userLookup && visible.length === 0 && <p className="empty-list">No chats yet. Start one with a username.</p>}
+          {userLookup && visible.length === 0 && <p className="empty-list">No users match that search.</p>}
           {visible.map((conversation) => {
             const title = chatTitle(conversation);
             const group = conversation.kind === "group";
@@ -1722,6 +2012,27 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                 </button>
               )}
             </header>
+            <div className="chat-search">
+              {chatQuery.trim() && (
+                <div className="word-hits">
+                  {chatSearching && <p className="empty-list">Searching this chat…</p>}
+                  {chatHits.map((hit) => (
+                    <button type="button" key={hit.nonce} className="chat-row search-hit" onClick={() => void openHit(hit)}>
+                      <span className="chat-copy">
+                        <em>{hit.snippet}</em>
+                      </span>
+                    </button>
+                  ))}
+                  {!chatSearching && chatHits.length === 0 && <p className="empty-list">No messages in this chat match that search.</p>}
+                </div>
+              )}
+              <label className="search-line">
+                <input value={chatQuery} onChange={(event) => setChatQuery(event.target.value)} placeholder="Search this chat" aria-label="Search this chat" />
+                <button type="button" className={chatPhrase ? "phrase on" : "phrase"} aria-pressed={chatPhrase} onClick={() => setChatPhrase((current) => !current)}>
+                  Search
+                </button>
+              </label>
+            </div>
             <div
               className="messages"
               ref={scrollerRef}
@@ -1741,7 +2052,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
               {(() => {
                 const byNonce = new Map(activeMessages.map((item) => [item.nonce, item]));
                 const visible = activeMessages.filter((item) => collectorNonce(item, byNonce) === null);
-                const renderBubble = (message: ChatMessage, nested: boolean) => {
+                const renderBubble = (message: ChatMessage, nested: boolean, menuUp: boolean) => {
                   const mine = message.senderId === user.id;
                   const read = Boolean(active.peerLastReadAt && message.createdAt <= active.peerLastReadAt);
                   const canAct = !message.failed && Boolean(message.text.trim() || message.file);
@@ -1750,11 +2061,16 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                   const canEdit = mine && saved && !message.failed;
                   const gathered = message.collectsReplies ? repliesFor(message.nonce, activeMessages, byNonce) : [];
                   const open = Boolean(openFolders[message.nonce]);
+                  const showActions = canAct || canDelete || canEdit || saved || (!message.failed && Boolean(message.text.trim() || message.file));
+                  const canReact = !message.failed && !message.pending && !message.id.startsWith("local:");
                   return (
-                    <article id={`msg-${message.nonce}`} className={`${mine ? "bubble out" : "bubble in"}${message.id === editingId ? " editing" : ""}`}>
+                    <article id={`msg-${message.nonce}`} className={`message-row ${mine ? "out" : "in"}${message.id === editingId ? " editing" : ""}${menuUp ? " menu-up" : ""}`}>
+                      <div className={`bubble ${mine ? "out" : "in"}`}>
                       {active.kind === "group" && !mine && !message.failed && (
                         <p className="sender-name">{personName(active, message.senderId, user.id)}</p>
                       )}
+                      <div className="bubble-line">
+                      <div className="bubble-copy">
                       {message.failed ? (
                         <p>Unable to decrypt this message.</p>
                       ) : (
@@ -1772,6 +2088,48 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                           {message.text && <p>{message.text}</p>}
                         </>
                       )}
+                      </div>
+                      {showActions && (
+                        <span className="message-tools" onPointerDown={(event) => event.stopPropagation()}>
+                          <button
+                            type="button"
+                            className="dots"
+                            aria-label="Message actions"
+                            aria-expanded={actionMenu === message.nonce}
+                            onClick={() => {
+                              setReactMenu(null);
+                              setActionMenu((current) => (current === message.nonce ? null : message.nonce));
+                            }}
+                          >
+                            <DotsGlyph />
+                          </button>
+                          {actionMenu === message.nonce && (
+                        <span className="bubble-actions" role="menu">
+                          {!message.failed && Boolean(message.text.trim() || message.file) && (
+                                <button type="button" role="menuitem" onClick={() => void copyMessage(message)}>Copy</button>
+                              )}
+                              {canAct && (
+                                <>
+                                  <button type="button" role="menuitem" onClick={() => { setActionMenu(null); beginReply(message); }}>Reply</button>
+                                  <button type="button" role="menuitem" onClick={() => { setActionMenu(null); beginForward(message); }}>Forward</button>
+                                </>
+                              )}
+                              {canEdit && (
+                                <button type="button" role="menuitem" onClick={() => { setActionMenu(null); beginEdit(message); }}>Edit</button>
+                              )}
+                              {saved && (
+                                <button type="button" role="menuitem" onClick={() => { setActionMenu(null); void toggleCollect(message); }}>
+                                  {message.collectsReplies ? "Stop collecting" : "Collect replies"}
+                                </button>
+                              )}
+                              {canDelete && (
+                                <button type="button" role="menuitem" className="danger" onClick={() => { setActionMenu(null); beginDelete(message); }}>Delete</button>
+                              )}
+                            </span>
+                          )}
+                        </span>
+                      )}
+                      </div>
                       {message.collectsReplies && (
                         <>
                           <button
@@ -1790,39 +2148,65 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                           {open && (
                             <div className="folder-replies">
                               {gathered.length === 0 && <p className="folder-empty">Replies will gather here.</p>}
-                              {gathered.map((reply) => (
-                                <Fragment key={reply.nonce}>{renderBubble(reply, true)}</Fragment>
+                              {gathered.map((reply, replyIndex) => (
+                                <Fragment key={reply.nonce}>{renderBubble(reply, true, menuUp && replyIndex === gathered.length - 1)}</Fragment>
                               ))}
                             </div>
                           )}
                         </>
                       )}
                       <span className="bubble-meta">
-                        {(canAct || canDelete || canEdit || saved) && (
-                          <span className="bubble-actions">
-                            {canAct && (
-                              <>
-                                <button type="button" onClick={() => beginReply(message)}>Reply</button>
-                                <button type="button" onClick={() => beginForward(message)}>Forward</button>
-                              </>
-                            )}
-                            {canEdit && (
-                              <button type="button" onClick={() => beginEdit(message)}>Edit</button>
-                            )}
-                            {saved && (
-                              <button type="button" onClick={() => void toggleCollect(message)}>
-                                {message.collectsReplies ? "Stop collecting" : "Collect replies"}
-                              </button>
-                            )}
-                            {canDelete && (
-                              <button type="button" onClick={() => beginDelete(message)}>Delete</button>
-                            )}
-                          </span>
-                        )}
+                        {copiedNonce === message.nonce && <span className="copied">Copied</span>}
                         {message.editedAt && <span className="edited">edited</span>}
                         <time>{formatTime(message.createdAt)}</time>
                         {mine && <span className={read ? "ticks read" : "ticks"}>{message.pending ? "…" : read ? "✓✓" : "✓"}</span>}
                       </span>
+                      {(message.reactions ?? []).length > 0 && (
+                        <span className="reaction-chips">
+                          {reactionGroups(message.reactions).map((group) => (
+                            <button
+                              type="button"
+                              key={group.emoji}
+                              className={group.userIds.includes(user.id) ? "mine" : ""}
+                              onClick={() => void reactTo(message, group.emoji)}
+                            >
+                              {group.emoji}{group.userIds.length > 1 ? ` ${group.userIds.length}` : ""}
+                            </button>
+                          ))}
+                        </span>
+                      )}
+                      </div>
+                      {canReact && (
+                        <span className="react-tools" onPointerDown={(event) => event.stopPropagation()}>
+                          <button
+                            type="button"
+                            className="react-open"
+                            aria-label="React"
+                            aria-expanded={reactMenu === message.nonce}
+                            onClick={() => {
+                              setActionMenu(null);
+                              setReactMenu((current) => (current === message.nonce ? null : message.nonce));
+                            }}
+                          >
+                            ☺
+                          </button>
+                          {reactMenu === message.nonce && (
+                            <span className="react-row">
+                              {REACTION_EMOJI.map((emoji) => (
+                                <button
+                                  type="button"
+                                  key={emoji}
+                                  className={(message.reactions ?? []).some((reaction) => reaction.userId === user.id && reaction.emoji === emoji) ? "on" : ""}
+                                  aria-label={`React with ${emoji}`}
+                                  onClick={() => void reactTo(message, emoji)}
+                                >
+                                  {emoji}
+                                </button>
+                              ))}
+                            </span>
+                          )}
+                        </span>
+                      )}
                     </article>
                   );
                 };
@@ -1831,7 +2215,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                   return (
                     <Fragment key={message.nonce}>
                       {(!previous || !sameDay(previous.createdAt, message.createdAt)) && <p className="day">{dayLabel(message.createdAt)}</p>}
-                      {renderBubble(message, false)}
+                      {renderBubble(message, false, index === visible.length - 1)}
                     </Fragment>
                   );
                 });
@@ -1966,41 +2350,40 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
           </div>
         )}
       </section>
+      {!active && <div className="word-search">
+        {wordLookup && (
+          <div className="word-hits">
+            {searching && <p className="empty-list">Searching messages…</p>}
+            {hits.map((hit) => {
+              const conversation = conversations.find((item) => item.id === hit.conversationId);
+              if (!conversation) return null;
+              return (
+                <button type="button" key={`${hit.conversationId}:${hit.nonce}`} className="chat-row search-hit" onClick={() => void openHit(hit)}>
+                  <Avatar name={chatTitle(conversation)} username={conversation.kind === "group" ? conversation.id : conversation.peer?.username || chatTitle(conversation)} />
+                  <span className="chat-copy">
+                    <strong>{chatTitle(conversation)}</strong>
+                    <em>{hit.snippet}</em>
+                  </span>
+                </button>
+              );
+            })}
+            {!searching && hits.length === 0 && <p className="empty-list">No messages match that search.</p>}
+          </div>
+        )}
+        <label className="search-line">
+          <span className="sr">Search all chats</span>
+          <input value={wordQuery} onChange={(event) => setWordQuery(event.target.value)} placeholder="Search all chats" aria-label="Search all chats" />
+          <button type="button" className={wordPhrase ? "phrase on" : "phrase"} aria-pressed={wordPhrase} onClick={() => setWordPhrase((current) => !current)}>
+            Search
+          </button>
+        </label>
+      </div>}
       {dialog && (
         <div className="dialog-backdrop" onMouseDown={() => setDialog(null)}>
           <div className="dialog" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
             {dialog === "new" && (
               <form onSubmit={(event) => void startChat(event)}>
                 <h2>New chat</h2>
-                <p className="hint">Choose someone on this server, or type their username.</p>
-                <div className="forward-list">
-                  {directory
-                    .filter((person) => {
-                      const query = lookup.trim().toLowerCase();
-                      if (!query) return true;
-                      return person.username.includes(query) || person.displayName.toLowerCase().includes(query);
-                    })
-                    .map((person) => (
-                      <button
-                        type="button"
-                        key={person.id}
-                        className="chat-row"
-                        onClick={() => {
-                          setLookupError("");
-                          void openWithPerson(person.username).catch((error: unknown) => {
-                            setLookupError(error instanceof Error ? error.message : "Couldn't start the chat.");
-                          });
-                        }}
-                      >
-                        <Avatar name={person.displayName} username={person.username} />
-                        <span className="chat-copy">
-                          <strong>{person.displayName}</strong>
-                          <small>@{person.username}</small>
-                        </span>
-                      </button>
-                    ))}
-                  {directory.length === 0 && <p className="hint">No other accounts yet.</p>}
-                </div>
                 <label className="field">
                   Username
                   <input value={lookup} onChange={(event) => setLookup(event.target.value)} placeholder="bob" autoFocus />
@@ -2157,13 +2540,54 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
               <div>
                 <h2>{user.displayName}</h2>
                 <p className="hint">@{user.username} · {user.provider === "google" ? "Gmail sign-in" : "Password sign-in"}</p>
-                <p className="hint">Your key fingerprint</p>
-                <div className="safety-grid">{fingerprint.map((group, index) => <span key={`${group}-${index}`}>{group}</span>)}</div>
+                <button type="button" className="text" onClick={() => setShowFingerprint((current) => !current)}>
+                  {showFingerprint ? "Hide key fingerprint" : "Show key fingerprint"}
+                </button>
+                {showFingerprint && (
+                  <>
+                    <div className="safety-grid">{fingerprint.map((group, index) => <span key={`${group}-${index}`}>{group}</span>)}</div>
+                    <button type="button" className="text" onClick={() => setDialog("reset")}>Reset encryption keys</button>
+                  </>
+                )}
                 <div className="row-actions">
-                  <button type="button" className="text" onClick={() => setDialog("reset")}>Reset encryption keys</button>
+                  {user.provider === "password" && (
+                    <button
+                      type="button"
+                      className="text"
+                      onClick={() => {
+                        setPasswordCurrent("");
+                        setPasswordNext("");
+                        setPasswordConfirm("");
+                        setPasswordError("");
+                        setDialog("password");
+                      }}
+                    >
+                      Change password
+                    </button>
+                  )}
                   <button type="button" className="text" onClick={onLogout}>Sign out</button>
                 </div>
               </div>
+            )}
+            {dialog === "password" && (
+              <form onSubmit={(event) => void changePassword(event)}>
+                <h2>Change password</h2>
+                <p className="hint">Your chats stay readable. The new password unlocks the same encryption keys.</p>
+                <label className="field">
+                  Current password
+                  <input type="password" value={passwordCurrent} onChange={(event) => setPasswordCurrent(event.target.value)} autoFocus />
+                </label>
+                <label className="field">
+                  New password
+                  <input type="password" value={passwordNext} onChange={(event) => setPasswordNext(event.target.value)} />
+                </label>
+                <label className="field">
+                  Confirm new password
+                  <input type="password" value={passwordConfirm} onChange={(event) => setPasswordConfirm(event.target.value)} />
+                </label>
+                {passwordError && <p className="error">{passwordError}</p>}
+                <button className="primary" type="submit" disabled={passwordBusy}>{passwordBusy ? "Saving…" : "Save password"}</button>
+              </form>
             )}
             {dialog === "reset" && (
               <form onSubmit={(event) => void replaceKeys(event)}>
@@ -2328,6 +2752,16 @@ function FolderGlyph() {
   return (
     <svg viewBox="0 0 92 68" className="icon folder-svg" aria-hidden="true">
       <path d="M4 18a6 6 0 0 1 6-6h24l8 8h40a6 6 0 0 1 6 6v32a6 6 0 0 1-6 6H10a6 6 0 0 1-6-6V18z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function DotsGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" className="dots-icon" aria-hidden="true">
+      <circle cx="12" cy="5" r="1.7" />
+      <circle cx="12" cy="12" r="1.7" />
+      <circle cx="12" cy="19" r="1.7" />
     </svg>
   );
 }

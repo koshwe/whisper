@@ -62,7 +62,13 @@ export type StoredMessage = {
   signature: string;
   collectsReplies: boolean;
   editedAt: string | null;
+  reactions: MessageReaction[];
   forMe: { ephPublic: string; iv: string; ciphertext: string } | null;
+};
+
+export type MessageReaction = {
+  userId: string;
+  emoji: string;
 };
 
 export type ConversationSummary = {
@@ -131,6 +137,7 @@ function toMessage(row: MessageRow): StoredMessage {
     signature: row.signature,
     collectsReplies: row.collects_replies === 1,
     editedAt: row.edited_at,
+    reactions: [],
     forMe: null,
   };
 }
@@ -201,6 +208,16 @@ export function openDatabase(dbPath: string) {
       UNIQUE (conversation_id, nonce),
       FOREIGN KEY (conversation_id) REFERENCES conversations(id),
       FOREIGN KEY (sender_id) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS reactions (
+      message_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      emoji TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (message_id, user_id),
+      FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id)
     );
 
     CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
@@ -328,6 +345,12 @@ export function openDatabase(dbPath: string) {
   const touchConversation = db.prepare("UPDATE conversations SET last_message_at = ? WHERE id = ?");
   const messageById = db.prepare("SELECT * FROM messages WHERE id = ?");
   const setCollects = db.prepare("UPDATE messages SET collects_replies = ? WHERE id = ? AND conversation_id = ?");
+  const listReactions = db.prepare("SELECT user_id, emoji FROM reactions WHERE message_id = ? ORDER BY created_at");
+  const upsertReaction = db.prepare(`
+    INSERT INTO reactions (message_id, user_id, emoji, created_at) VALUES (?, ?, ?, ?)
+    ON CONFLICT (message_id, user_id) DO UPDATE SET emoji = excluded.emoji, created_at = excluded.created_at
+  `);
+  const deleteReaction = db.prepare("DELETE FROM reactions WHERE message_id = ? AND user_id = ?");
   const replaceMessageRow = db.prepare(`
     UPDATE messages SET
       recipient_eph_public = ?, recipient_iv = ?, recipient_ciphertext = ?,
@@ -369,6 +392,11 @@ export function openDatabase(dbPath: string) {
     SET ecdh_public = ?, ecdsa_public = ?, wrapped_ecdh = ?, wrapped_ecdsa = ?, wrap_salt = ?, wrap_iterations = ?
     WHERE id = ?
   `);
+  const updatePassword = db.prepare(`
+    UPDATE users
+    SET password_hash = ?, wrapped_ecdh = ?, wrapped_ecdsa = ?, wrap_salt = ?, wrap_iterations = ?
+    WHERE id = ?
+  `);
   const insertAttachment = db.prepare(
     "INSERT INTO attachments (id, conversation_id, sender_id, byte_length, created_at) VALUES (?, ?, ?, ?, ?)",
   );
@@ -395,8 +423,19 @@ export function openDatabase(dbPath: string) {
   type ConversationRow = { id: string; kind: string | null; title: string | null; created_at: string; last_message_at: string | null };
   type CopyRow = { eph_public: string; iv: string; ciphertext: string; signature: string };
 
+  function reactionsOf(messageId: string): MessageReaction[] {
+    return (listReactions.all(messageId) as Array<{ user_id: string; emoji: string }>).map((row) => ({
+      userId: row.user_id,
+      emoji: row.emoji,
+    }));
+  }
+
+  function withReactions(message: StoredMessage): StoredMessage {
+    return { ...message, reactions: reactionsOf(message.id) };
+  }
+
   function presentRow(row: MessageRow, viewerId: string, kind: "direct" | "group"): StoredMessage {
-    const message = toMessage(row);
+    const message = withReactions(toMessage(row));
     if (kind !== "group") return message;
     const copy = copyForUser.get(row.id, viewerId) as CopyRow | undefined;
     if (!copy) return message;
@@ -496,6 +535,10 @@ export function openDatabase(dbPath: string) {
     },
     saveKeys(userId: string, keys: KeyBackup) {
       updateKeys.run(keys.ecdhPublic, keys.ecdsaPublic, keys.wrappedEcdh, keys.wrappedEcdsa, keys.wrapSalt, keys.wrapIterations, userId);
+      return requireUser(userId);
+    },
+    changePassword(userId: string, passwordHash: string, keys: KeyBackup) {
+      updatePassword.run(passwordHash, keys.wrappedEcdh, keys.wrappedEcdsa, keys.wrapSalt, keys.wrapIterations, userId);
       return requireUser(userId);
     },
     createSession(userId: string) {
@@ -606,7 +649,7 @@ export function openDatabase(dbPath: string) {
         );
         touchConversation.run(createdAt, input.conversationId);
       });
-      return toMessage(messageById.get(id) as MessageRow);
+      return withReactions(toMessage(messageById.get(id) as MessageRow));
     },
     listMessages(conversationId: string, userId: string, before: string | null, limit: number) {
       const kind = kindOf(conversationId);
@@ -621,7 +664,7 @@ export function openDatabase(dbPath: string) {
     },
     getMessage(messageId: string) {
       const row = messageById.get(messageId) as MessageRow | undefined;
-      return row ? toMessage(row) : null;
+      return row ? withReactions(toMessage(row)) : null;
     },
     getMessageFor(messageId: string, viewerId: string) {
       const row = messageById.get(messageId) as MessageRow | undefined;
@@ -721,13 +764,20 @@ export function openDatabase(dbPath: string) {
       );
       if (updated.changes !== 1) return null;
       const row = messageById.get(input.messageId) as MessageRow | undefined;
-      return row ? toMessage(row) : null;
+      return row ? withReactions(toMessage(row)) : null;
     },
     setCollectsReplies(conversationId: string, messageId: string, collects: boolean) {
       const updated = setCollects.run(collects ? 1 : 0, messageId, conversationId);
       if (updated.changes !== 1) return null;
       const row = messageById.get(messageId) as MessageRow | undefined;
-      return row ? toMessage(row) : null;
+      return row ? withReactions(toMessage(row)) : null;
+    },
+    setReaction(conversationId: string, messageId: string, userId: string, emoji: string | null) {
+      const row = messageById.get(messageId) as MessageRow | undefined;
+      if (!row || row.conversation_id !== conversationId || !memberExists.get(conversationId, userId)) return null;
+      if (emoji) upsertReaction.run(messageId, userId, emoji, new Date().toISOString());
+      else deleteReaction.run(messageId, userId);
+      return { nonce: row.nonce, reactions: reactionsOf(messageId) };
     },
     deleteMessage(input: { conversationId: string; messageId: string; senderId: string }) {
       const row = messageById.get(input.messageId) as MessageRow | undefined;

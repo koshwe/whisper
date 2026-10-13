@@ -15,6 +15,7 @@ import {
   generateIdentity,
   packPayload,
   sha256Base64,
+  unwrapIdentity,
   wrapIdentity,
   type Identity,
 } from "../../shared/src/crypto.ts";
@@ -130,6 +131,24 @@ test("relays ciphertext and leaves the server unable to read it", async () => {
       body: JSON.stringify({ collects: false }),
     });
     assert.equal(cleared.status, 200);
+
+    const reacted = await fetch(`${base}/api/conversations/${conversationId}/messages/${stored.id}/react`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${bob.token}` },
+      body: JSON.stringify({ emoji: "👍" }),
+    });
+    assert.equal(reacted.status, 200);
+    const reactedList = await fetch(`${base}/api/conversations/${conversationId}/messages`, {
+      headers: { Authorization: `Bearer ${alice.token}` },
+    });
+    const reactedBody = (await reactedList.json()) as { messages: Array<{ id: string; reactions: Array<{ userId: string; emoji: string }> }> };
+    assert.deepEqual(reactedBody.messages.find((message) => message.id === stored.id)?.reactions, [{ userId: bob.user.id, emoji: "👍" }]);
+    const clearedReaction = await fetch(`${base}/api/conversations/${conversationId}/messages/${stored.id}/react`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${bob.token}` },
+      body: JSON.stringify({ emoji: null }),
+    });
+    assert.equal(clearedReaction.status, 200);
 
     const tampered = await fetch(`${base}/api/conversations/${conversationId}/messages`, {
       method: "POST",
@@ -372,6 +391,73 @@ test("seals a group message separately for each member", async () => {
     started.db.checkpoint();
     const raw = JSON.stringify(started.db.listMessages(conversationId, alice.user.id, null, 10));
     assert.equal(raw.includes(secret), false);
+  } finally {
+    await started.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("changes a password without replacing encryption keys", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "whisper-password-"));
+  const started = await createServer({ dbPath: path.join(directory, "whisper.sqlite"), port: 0 });
+  const base = `http://127.0.0.1:${started.port}`;
+
+  try {
+    const aliceKeys = await generateIdentity();
+    const alice = await registerUser(base, "alice", "alice-password-1", aliceKeys);
+    const rejected = await fetch(`${base}/api/auth/password`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${alice.token}` },
+      body: JSON.stringify({
+        authVerifier: await deriveAuthVerifier("alice", "wrong-password"),
+        nextAuthVerifier: await deriveAuthVerifier("alice", "alice-password-new"),
+        ...(await wrapIdentity(aliceKeys, "alice-password-new")),
+      }),
+    });
+    assert.equal(rejected.status, 401);
+
+    const nextPassword = "alice-password-new";
+    const changed = await fetch(`${base}/api/auth/password`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${alice.token}` },
+      body: JSON.stringify({
+        authVerifier: await deriveAuthVerifier("alice", "alice-password-1"),
+        nextAuthVerifier: await deriveAuthVerifier("alice", nextPassword),
+        ...(await wrapIdentity(aliceKeys, nextPassword)),
+      }),
+    });
+    const changedBody = (await changed.json()) as {
+      user?: { ecdhPublic: string; ecdsaPublic: string; wrappedEcdh: string; wrappedEcdsa: string; wrapSalt: string; wrapIterations: number };
+      error?: string;
+    };
+    assert.equal(changed.status, 200, changedBody.error);
+    assert.equal(changedBody.user?.ecdhPublic, alice.user.ecdhPublic);
+    assert.equal(changedBody.user?.ecdsaPublic, alice.user.ecdsaPublic);
+    const unlocked = await unwrapIdentity(
+      {
+        ecdhPublic: changedBody.user!.ecdhPublic,
+        ecdsaPublic: changedBody.user!.ecdsaPublic,
+        wrappedEcdh: changedBody.user!.wrappedEcdh,
+        wrappedEcdsa: changedBody.user!.wrappedEcdsa,
+        wrapSalt: changedBody.user!.wrapSalt,
+        wrapIterations: changedBody.user!.wrapIterations,
+      },
+      nextPassword,
+    );
+    assert.equal(unlocked.ecdhPublic, aliceKeys.ecdhPublic);
+
+    const oldLogin = await fetch(`${base}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: "alice", authVerifier: await deriveAuthVerifier("alice", "alice-password-1") }),
+    });
+    assert.equal(oldLogin.status, 401);
+    const newLogin = await fetch(`${base}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: "alice", authVerifier: await deriveAuthVerifier("alice", nextPassword) }),
+    });
+    assert.equal(newLogin.status, 200);
   } finally {
     await started.close();
     await rm(directory, { recursive: true, force: true });

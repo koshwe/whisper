@@ -300,6 +300,34 @@ export function registerRoutes(app: Express, db: WhisperDb, filesDir: string) {
   );
 
   app.post(
+    "/api/auth/password",
+    asyncRoute(async (req, res) => {
+      const user = currentUser(req, db);
+      if (!rateLimit(`password:${user.id}`, 5, 10 * 60 * 1000)) {
+        throw new HttpError(429, "Too many attempts. Wait a few minutes and try again.");
+      }
+      if (!user.password_hash || !user.ecdh_public || !user.ecdsa_public) {
+        throw new HttpError(400, "This account cannot change a password.");
+      }
+      const body = req.body as Record<string, unknown>;
+      const authVerifier = requireBase64(body.authVerifier, "login verifier", 100);
+      const nextAuthVerifier = requireBase64(body.nextAuthVerifier, "login verifier", 100);
+      if (!verifierMatches(authVerifier, user.password_hash)) {
+        throw new HttpError(401, "That password doesn't match this account.");
+      }
+      if (verifierMatches(nextAuthVerifier, user.password_hash)) {
+        throw new HttpError(400, "Choose a different password.");
+      }
+      const keys = parseKeys(body);
+      if (keys.ecdhPublic !== user.ecdh_public || keys.ecdsaPublic !== user.ecdsa_public) {
+        throw new HttpError(400, "Password change must keep the same encryption keys.");
+      }
+      const saved = db.changePassword(user.id, hashVerifier(nextAuthVerifier), keys);
+      res.json({ user: db.toAccount(saved) });
+    }),
+  );
+
+  app.post(
     "/api/auth/logout",
     asyncRoute(async (req, res) => {
       const header = req.header("authorization") ?? "";
@@ -712,6 +740,33 @@ export function registerRoutes(app: Express, db: WhisperDb, filesDir: string) {
         sendToUser(memberId, memberId === user.id ? event : { ...event, unreadCount: db.unreadFor(conversationId, memberId) });
       }
       res.json({ ok: true, lastMessageAt: removed.lastMessageAt });
+    }),
+  );
+
+  const reactionEmoji = new Set(["👍", "❤️", "😂", "😮", "😢", "🙏", "🔥", "🎉"]);
+
+  app.post(
+    "/api/conversations/:id/messages/:messageId/react",
+    asyncRoute(async (req, res) => {
+      const user = currentUser(req, db);
+      const conversationId = req.params.id;
+      const conversation = db.getConversation(conversationId, user.id);
+      if (!conversation) throw new HttpError(404, "Chat not found.");
+      const raw = (req.body as { emoji?: unknown }).emoji;
+      const emoji = raw === null ? null : typeof raw === "string" ? raw : undefined;
+      if (emoji === undefined || (emoji !== null && !reactionEmoji.has(emoji))) {
+        throw new HttpError(400, "Choose an emoji.");
+      }
+      const saved = db.setReaction(conversationId, req.params.messageId, user.id, emoji);
+      if (!saved) throw new HttpError(404, "Message not found.");
+      publishToMembers(conversationId, {
+        type: "react",
+        conversationId,
+        messageId: req.params.messageId,
+        nonce: saved.nonce,
+        reactions: saved.reactions,
+      });
+      res.json({ reactions: saved.reactions });
     }),
   );
 

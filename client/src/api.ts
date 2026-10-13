@@ -29,6 +29,12 @@ export type ServerMessage = {
   signature: string;
   collectsReplies: boolean;
   editedAt: string | null;
+  reactions: MessageReaction[];
+};
+
+export type MessageReaction = {
+  userId: string;
+  emoji: string;
 };
 
 export type Conversation = {
@@ -110,6 +116,10 @@ export function confirmPassword(authVerifier: string) {
   });
 }
 
+export function changePassword(body: WrappedIdentity & { authVerifier: string; nextAuthVerifier: string }) {
+  return request<{ user: Account }>("/api/auth/password", { method: "POST", body: JSON.stringify(body) });
+}
+
 export function saveKeys(keys: WrappedIdentity) {
   return request<{ user: Account }>("/api/keys", { method: "POST", body: JSON.stringify(keys) });
 }
@@ -161,6 +171,13 @@ export function deleteMessage(conversationId: string, messageId: string, attachm
     `/api/conversations/${conversationId}/messages/${messageId}`,
     { method: "DELETE", body: JSON.stringify({ attachmentId: attachmentId ?? null }) },
   );
+}
+
+export function setReaction(conversationId: string, messageId: string, emoji: string | null) {
+  return request<{ reactions: MessageReaction[] }>(`/api/conversations/${conversationId}/messages/${messageId}/react`, {
+    method: "POST",
+    body: JSON.stringify({ emoji }),
+  });
 }
 
 export function setCollectsReplies(conversationId: string, messageId: string, collects: boolean) {
