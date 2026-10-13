@@ -1,0 +1,25 @@
+{
+  "name": "whisper",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Web chat with end-to-end encryption",
+  "engines": {
+    "node": ">=24"
+  },
+  "workspaces": [
+    "shared",
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,client -c green,cyan \"npm run dev -w @whisper/server\" \"npm run dev -w @whisper/client\"",
+    "build": "npm run build -w @whisper/client",
+    "start": "npm run start -w @whisper/server",
+    "test": "tsx --test shared/src/crypto.test.ts server/test/e2e.test.ts"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}
