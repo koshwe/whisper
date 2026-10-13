@@ -14,5 +14,4 @@ const dbPath = process.env.WHISPER_DB ?? path.join(dataDir, "whisper.sqlite");
 const port = Number(process.env.PORT ?? 3001);
 const started = await createServer({ dbPath, port });
 
-console.log(`Whisper API listening on http://127.0.0.1:${started.port}`);
-console.log("Open the app at http://localhost:5173");
+console.log(`Whisper listening on http://0.0.0.0:${started.port}`);

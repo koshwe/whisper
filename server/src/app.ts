@@ -60,7 +60,7 @@ export async function createServer(options: { dbPath: string; port: number }) {
   const server: Server = createHttpServer(app);
   attachWebSocket(server, db);
   await new Promise<void>((resolve) => {
-    server.listen(options.port, "127.0.0.1", () => resolve());
+    server.listen(options.port, "0.0.0.0", () => resolve());
   });
   const address = server.address();
   const port = typeof address === "object" && address ? address.port : options.port;
