@@ -7,10 +7,15 @@ import { loadEnv } from "./env.ts";
 loadEnv();
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const dataDir = path.resolve(here, "../data");
+const volume = process.env.RAILWAY_VOLUME_MOUNT_PATH;
+const dataDir = process.env.WHISPER_DB
+  ? path.dirname(path.resolve(process.env.WHISPER_DB))
+  : volume
+    ? path.resolve(volume)
+    : path.resolve(here, "../data");
 mkdirSync(dataDir, { recursive: true });
 
-const dbPath = process.env.WHISPER_DB ?? path.join(dataDir, "whisper.sqlite");
+const dbPath = process.env.WHISPER_DB ? path.resolve(process.env.WHISPER_DB) : path.join(dataDir, "whisper.sqlite");
 const port = Number(process.env.PORT ?? 3001);
 const started = await createServer({ dbPath, port });
 

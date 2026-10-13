@@ -122,6 +122,10 @@ export function searchUsers(query: string) {
   return request<{ users: PublicUser[] }>(`/api/users/search?q=${encodeURIComponent(query)}`);
 }
 
+export function listUsers() {
+  return request<{ users: PublicUser[] }>("/api/users");
+}
+
 export function listConversations() {
   return request<{ conversations: Conversation[] }>("/api/conversations");
 }

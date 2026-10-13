@@ -25,6 +25,7 @@ import {
   downloadAttachment,
   listConversations,
   listMessages,
+  listUsers,
   markRead,
   openConversation,
   resetKeys as resetKeysRequest,
@@ -36,6 +37,7 @@ import {
   uploadAttachment,
   type Account,
   type Conversation,
+  type PublicUser,
   type ServerMessage,
 } from "../api";
 import { saveIdentity } from "../idb";
@@ -366,6 +368,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
   const [fingerprint, setFingerprint] = useState<string[]>([]);
   const [lookup, setLookup] = useState("");
   const [lookupError, setLookupError] = useState("");
+  const [directory, setDirectory] = useState<PublicUser[]>([]);
   const [groupTitle, setGroupTitle] = useState("");
   const [groupUser, setGroupUser] = useState("");
   const [groupMembers, setGroupMembers] = useState<string[]>([]);
@@ -465,6 +468,21 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
       cancelled = true;
     };
   }, [identity, user.id]);
+
+  useEffect(() => {
+    if (dialog !== "new") return;
+    let cancelled = false;
+    listUsers()
+      .then(({ users }) => {
+        if (!cancelled) setDirectory(users);
+      })
+      .catch(() => {
+        if (!cancelled) setDirectory([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [dialog]);
 
   useEffect(() => {
     const peerKey = active?.peer?.ecdsaPublic;
@@ -595,6 +613,19 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
   async function handleEvent(event: WsEvent) {
     if (event.type === "hello") {
       setOnline(new Set(event.onlineUserIds));
+      try {
+        const { conversations: list } = await listConversations();
+        replaceConversations(list);
+        const nextPreviews: Record<string, string> = {};
+        for (const conversation of list) {
+          if (!conversation.lastMessage) continue;
+          const revealed = await revealMessage(conversation.lastMessage, conversation, identityRef.current, user.id);
+          nextPreviews[conversation.id] = previewText(revealed);
+        }
+        setPreviews((current) => ({ ...current, ...nextPreviews }));
+      } catch {
+        // The socket connected. Keep the chats already on screen if the refresh fails.
+      }
       return;
     }
     if (event.type === "presence") {
@@ -1430,7 +1461,8 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     setForwardError("");
     try {
       const { users } = await searchUsers(username);
-      const match = users.find((person) => person.username === username);
+      const match = users.find((person) => person.username === username)
+        ?? users.find((person) => person.displayName.toLowerCase() === username);
       if (!match) {
         setForwardError("No one uses that username.");
         setForwarding(false);
@@ -1441,7 +1473,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
         setForwarding(false);
         return;
       }
-      const { conversation } = await openConversation(username);
+      const { conversation } = await openConversation(match.username);
       const next = [conversation, ...conversationsRef.current.filter((item) => item.id !== conversation.id)];
       replaceConversations(next);
       setForwarding(false);
@@ -1458,7 +1490,8 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     setLookupError("");
     try {
       const { users } = await searchUsers(username);
-      const match = users.find((person) => person.username === username);
+      const match = users.find((person) => person.username === username)
+        ?? users.find((person) => person.displayName.toLowerCase() === username);
       if (!match) {
         setLookupError("No one uses that username.");
         return;
@@ -1467,15 +1500,19 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
         setLookupError("That person hasn't finished setting up encryption yet.");
         return;
       }
-      const { conversation } = await openConversation(username);
-      const next = [conversation, ...conversationsRef.current.filter((item) => item.id !== conversation.id)];
-      replaceConversations(next);
-      setDialog(null);
-      setLookup("");
-      selectConversation(conversation);
+      await openWithPerson(match.username);
     } catch (error) {
       setLookupError(error instanceof Error ? error.message : "Couldn't start the chat.");
     }
+  }
+
+  async function openWithPerson(username: string) {
+    const { conversation } = await openConversation(username);
+    const next = [conversation, ...conversationsRef.current.filter((item) => item.id !== conversation.id)];
+    replaceConversations(next);
+    setDialog(null);
+    setLookup("");
+    selectConversation(conversation);
   }
 
   async function replaceKeys(event: FormEvent) {
@@ -1935,6 +1972,35 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
             {dialog === "new" && (
               <form onSubmit={(event) => void startChat(event)}>
                 <h2>New chat</h2>
+                <p className="hint">Choose someone on this server, or type their username.</p>
+                <div className="forward-list">
+                  {directory
+                    .filter((person) => {
+                      const query = lookup.trim().toLowerCase();
+                      if (!query) return true;
+                      return person.username.includes(query) || person.displayName.toLowerCase().includes(query);
+                    })
+                    .map((person) => (
+                      <button
+                        type="button"
+                        key={person.id}
+                        className="chat-row"
+                        onClick={() => {
+                          setLookupError("");
+                          void openWithPerson(person.username).catch((error: unknown) => {
+                            setLookupError(error instanceof Error ? error.message : "Couldn't start the chat.");
+                          });
+                        }}
+                      >
+                        <Avatar name={person.displayName} username={person.username} />
+                        <span className="chat-copy">
+                          <strong>{person.displayName}</strong>
+                          <small>@{person.username}</small>
+                        </span>
+                      </button>
+                    ))}
+                  {directory.length === 0 && <p className="hint">No other accounts yet.</p>}
+                </div>
                 <label className="field">
                   Username
                   <input value={lookup} onChange={(event) => setLookup(event.target.value)} placeholder="bob" autoFocus />

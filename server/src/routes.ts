@@ -383,8 +383,16 @@ export function registerRoutes(app: Express, db: WhisperDb, filesDir: string) {
     "/api/users/search",
     asyncRoute(async (req, res) => {
       const user = currentUser(req, db);
-      const query = requireString(req.query.q, "Enter a username.", 20).toLowerCase();
+      const query = requireString(req.query.q, "Enter a username.", 40).toLowerCase();
       res.json({ users: db.searchUsers(user.id, query) });
+    }),
+  );
+
+  app.get(
+    "/api/users",
+    asyncRoute(async (req, res) => {
+      const user = currentUser(req, db);
+      res.json({ users: db.listOtherUsers(user.id) });
     }),
   );
 
@@ -406,6 +414,10 @@ export function registerRoutes(app: Express, db: WhisperDb, filesDir: string) {
       const peer = db.getUserByUsername(username);
       if (!peer) throw new HttpError(404, "No one uses that username.");
       const conversationId = db.openDirectConversation(user.id, peer.id);
+      for (const memberId of db.listMemberIds(conversationId)) {
+        const next = db.getConversation(conversationId, memberId);
+        if (next) sendToUser(memberId, { type: "conversation", conversation: decorate(next) });
+      }
       const conversation = db.getConversation(conversationId, user.id);
       res.status(201).json({ conversation: conversation ? decorate(conversation) : null });
     }),

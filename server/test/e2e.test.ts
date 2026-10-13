@@ -64,6 +64,15 @@ test("relays ciphertext and leaves the server unable to read it", async () => {
     assert.equal(opened.status, 201, openedBody.error);
     const conversationId = openedBody.conversation.id;
 
+    const people = await fetch(`${base}/api/users`, { headers: { Authorization: `Bearer ${alice.token}` } });
+    const peopleBody = (await people.json()) as { users: Array<{ username: string }>; error?: string };
+    assert.equal(people.status, 200, peopleBody.error);
+    assert.equal(peopleBody.users.some((person) => person.username === "bob"), true);
+    const bobChats = await fetch(`${base}/api/conversations`, { headers: { Authorization: `Bearer ${bob.token}` } });
+    const bobChatsBody = (await bobChats.json()) as { conversations: Array<{ id: string }> };
+    assert.equal(bobChats.status, 200);
+    assert.equal(bobChatsBody.conversations.some((conversation) => conversation.id === conversationId), true);
+
     const envelope = await encryptMessage({
       identity: aliceKeys,
       recipientEcdhPublic: bob.user.ecdhPublic,

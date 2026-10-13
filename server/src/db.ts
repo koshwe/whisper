@@ -263,10 +263,11 @@ export function openDatabase(dbPath: string) {
   const deleteSession = db.prepare("DELETE FROM sessions WHERE token = ?");
   const searchUsers = db.prepare(`
     SELECT * FROM users
-    WHERE id != ? AND username LIKE ? ESCAPE '\\'
+    WHERE id != ? AND (username LIKE ? ESCAPE '\\' OR lower(display_name) LIKE ? ESCAPE '\\')
     ORDER BY username
     LIMIT 8
   `);
+  const listOtherUsers = db.prepare("SELECT * FROM users WHERE id != ? ORDER BY username LIMIT ?");
   const conversationByKey = db.prepare("SELECT id FROM conversations WHERE direct_key = ?");
   const insertConversation = db.prepare(
     "INSERT INTO conversations (id, direct_key, kind, title, created_at, last_message_at) VALUES (?, ?, ?, ?, ?, NULL)",
@@ -512,7 +513,11 @@ export function openDatabase(dbPath: string) {
     },
     searchUsers(userId: string, query: string) {
       const escaped = query.toLowerCase().replace(/[\\%_]/g, (character) => `\\${character}`);
-      return (searchUsers.all(userId, `%${escaped}%`) as UserRow[]).map(toPublic);
+      const pattern = `%${escaped}%`;
+      return (searchUsers.all(userId, pattern, pattern) as UserRow[]).map(toPublic);
+    },
+    listOtherUsers(userId: string, limit = 50) {
+      return (listOtherUsers.all(userId, limit) as UserRow[]).map(toPublic);
     },
     openDirectConversation(userA: string, userB: string) {
       const key = [userA, userB].sort().join(":");
