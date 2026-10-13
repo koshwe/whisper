@@ -2161,6 +2161,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                         <time>{formatTime(message.createdAt)}</time>
                         {mine && <span className={read ? "ticks read" : "ticks"}>{message.pending ? "…" : read ? "✓✓" : "✓"}</span>}
                       </span>
+                      </div>
                       {(message.reactions ?? []).length > 0 && (
                         <span className="reaction-chips">
                           {reactionGroups(message.reactions).map((group) => (
@@ -2175,7 +2176,6 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                           ))}
                         </span>
                       )}
-                      </div>
                       {canReact && (
                         <span className="react-tools" onPointerDown={(event) => event.stopPropagation()}>
                           <button
