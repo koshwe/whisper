@@ -18,8 +18,22 @@ function certificateNames() {
   return [...names];
 }
 
+// Railway injects PORT and terminates TLS at its edge, so skip HTTPS there.
+const onRailway = Boolean(process.env.PORT);
+
+const apiTarget = process.env.API_TARGET || "http://127.0.0.1:3001";
+const wsTarget = apiTarget.replace(/^http/, "ws");
+
+const proxy = {
+  "/api": apiTarget,
+  "/ws": { target: wsTarget, ws: true },
+};
+
 export default defineConfig({
-  plugins: [react(), basicSsl({ name: "whisper", domains: certificateNames() })],
+  plugins: [
+    react(),
+    ...(onRailway ? [] : [basicSsl({ name: "whisper", domains: certificateNames() })]),
+  ],
   resolve: {
     alias: {
       "@whisper/shared": path.resolve(root, "../shared/src/crypto.ts"),
@@ -29,9 +43,13 @@ export default defineConfig({
     host: true,
     port: 5173,
     fs: { allow: [path.resolve(root, "..")] },
-    proxy: {
-      "/api": "http://127.0.0.1:3001",
-      "/ws": { target: "ws://127.0.0.1:3001", ws: true },
-    },
+    proxy,
+  },
+  preview: {
+    host: true,
+    port: 5173,
+    // Allow the Railway public domain; vite preview rejects unknown Host headers by default.
+    allowedHosts: true,
+    proxy,
   },
 });
