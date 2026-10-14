@@ -319,10 +319,9 @@ function retagPhoto(file: File, kind: ImageKind) {
   return new File([file], name, { type, lastModified: file.lastModified || Date.now() });
 }
 
-async function preparePhoto(file: File, fromCamera: boolean) {
+async function preparePhoto(file: File) {
   const named = kindFromType(file.type) ?? kindFromName(file.name) ?? await sniffImage(file);
   if (named) return retagPhoto(file, named);
-  if (fromCamera) return retagPhoto(file, "jpeg");
   return null;
 }
 
@@ -497,7 +496,6 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
   const typingSent = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const cameraInputRef = useRef<HTMLInputElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordStreamRef = useRef<MediaStream | null>(null);
   const recordChunksRef = useRef<Blob[]>([]);
@@ -1248,7 +1246,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     setPendingPreview(isPreviewableImage(file.type) ? URL.createObjectURL(file) : null);
   }
 
-  async function chooseFile(file: File | null, fromCamera = false) {
+  async function chooseFile(file: File | null) {
     if (!file) {
       attachReady(null);
       return;
@@ -1261,7 +1259,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
       setSendError("Files need to be 8 MB or smaller.");
       return;
     }
-    const photo = await preparePhoto(file, fromCamera);
+    const photo = await preparePhoto(file);
     if (photo) {
       setSendError("");
       setPhotoFile(photo);
@@ -2270,18 +2268,6 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                 void chooseFile(file);
               }}
             />
-            <input
-              ref={cameraInputRef}
-              className="sr"
-              type="file"
-              accept="image/*"
-              capture="environment"
-              onChange={(event) => {
-                const file = event.target.files?.[0] ?? null;
-                event.target.value = "";
-                void chooseFile(file, true);
-              }}
-            />
             <form
               className="composer"
               onSubmit={(event) => {
@@ -2346,9 +2332,6 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
               <div className="composer-row">
                 <button type="button" className="icon-button attach" aria-label="Attach a file" disabled={recording || Boolean(editing)} onClick={() => fileInputRef.current?.click()}>
                   <Paperclip />
-                </button>
-                <button type="button" className="icon-button attach camera-shot" aria-label="Take a photo" disabled={recording || Boolean(editing)} onClick={() => cameraInputRef.current?.click()}>
-                  <CameraGlyph />
                 </button>
                 <button
                   type="button"
@@ -2815,15 +2798,6 @@ function Paperclip() {
         strokeWidth="1.8"
         strokeLinecap="round"
       />
-    </svg>
-  );
-}
-
-function CameraGlyph() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon" aria-hidden="true">
-      <path d="M8 7.5 9.2 5.8A1.5 1.5 0 0 1 10.5 5h3a1.5 1.5 0 0 1 1.3.8L16 7.5h2.2A1.8 1.8 0 0 1 20 9.3v8a1.8 1.8 0 0 1-1.8 1.7H5.8A1.8 1.8 0 0 1 4 17.3v-8a1.8 1.8 0 0 1 1.8-1.8H8Z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
-      <circle cx="12" cy="13" r="3.1" fill="none" stroke="currentColor" strokeWidth="1.8" />
     </svg>
   );
 }

@@ -8,6 +8,9 @@ server/data
 .DS_Store
 *.log
 *.apk
+*.jks
+*.keystore
+client/android/keystore.properties
 client/android/.gradle
 client/android/build
 client/android/app/build

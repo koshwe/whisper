@@ -246,9 +246,7 @@ button { cursor: pointer; }
 .dialog-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); display: grid; place-items: center; padding: 20px; }
 .dialog { width: min(440px, 100%); }
 .photo-editor { width: min(560px, 100%); max-height: calc(100vh - 40px); max-height: calc(100dvh - 24px); overflow: auto; }
-.camera-shot { display: none; }
 @media (pointer: coarse), (max-width: 800px) {
-  .camera-shot { display: grid; place-items: center; }
   .crop-handle { width: 22px; height: 22px; }
   .crop-handle.n, .crop-handle.s { margin-left: -11px; }
   .crop-handle.e, .crop-handle.w { margin-top: -11px; }

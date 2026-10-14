@@ -43,6 +43,9 @@ export default defineConfig({
     host: true,
     port: 5173,
     fs: { allow: [path.resolve(root, "..")] },
+    watch: {
+      ignored: ["**/android/**/build/**", "**/*.apk"],
+    },
     proxy,
   },
   preview: {
