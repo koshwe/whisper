@@ -1,9 +1,10 @@
+import { createReadStream, existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import basicSsl from "@vitejs/plugin-basic-ssl";
 import react from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 
@@ -29,8 +30,29 @@ const proxy = {
   "/ws": { target: wsTarget, ws: true },
 };
 
+function serveApk(): Plugin {
+  const files = new Map([
+    ["/Whisper.apk", path.join(root, "public", "Whisper.apk")],
+    ["/InstallTest.apk", path.join(root, "public", "InstallTest.apk")],
+  ]);
+  return {
+    name: "serve-apk",
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const url = req.url?.split("?")[0];
+        const file = url ? files.get(url) : undefined;
+        if (!file || !existsSync(file)) return next();
+        res.setHeader("Content-Type", "application/vnd.android.package-archive");
+        res.setHeader("Content-Disposition", `attachment; filename="${path.basename(file)}"`);
+        createReadStream(file).pipe(res);
+      });
+    },
+  };
+}
+
 export default defineConfig({
   plugins: [
+    serveApk(),
     react(),
     ...(onRailway ? [] : [basicSsl({ name: "whisper", domains: certificateNames() })]),
   ],
