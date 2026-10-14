@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent } from "react";
 import {
   decryptFile,
   decryptGroupMessage,
@@ -255,6 +255,19 @@ function previewText(message: { text: string; file: AttachmentMeta | null; faile
   return message.forwarded ? `Forwarded: ${body}` : body;
 }
 
+function pastedImage(data: DataTransfer | null) {
+  if (!data) return null;
+  for (const item of data.items) {
+    if (item.kind !== "file" || !item.type.startsWith("image/")) continue;
+    const file = item.getAsFile();
+    if (file) return file;
+  }
+  for (const file of data.files) {
+    if (file.type.startsWith("image/")) return file;
+  }
+  return null;
+}
+
 function fileLabel(file: AttachmentMeta) {
   if (file.voice) return "Voice message";
   return isPreviewableImage(file.type) ? "Photo" : file.name;
@@ -329,6 +342,33 @@ function safeFileName(name: string) {
   const base = name.split(/[/\\]/).pop() ?? "file";
   const cleaned = base.replace(/[\u0000-\u001f]/g, "").trim().slice(0, 120);
   return cleaned || "file";
+}
+
+async function photoPngBlob(message: { conversationId: string; localUrl?: string; file: AttachmentMeta | null }) {
+  const file = message.file;
+  if (!file) throw new Error("Couldn't copy this photo.");
+  const source = message.localUrl
+    ? await (await fetch(message.localUrl)).blob()
+    : await decryptedBlob(message.conversationId, file);
+  if (source.type === "image/png") return source;
+  const bitmap = await createImageBitmap(source);
+  const canvas = document.createElement("canvas");
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Couldn't copy this photo.");
+  context.drawImage(bitmap, 0, 0);
+  bitmap.close();
+  const png = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+  if (!png) throw new Error("Couldn't copy this photo.");
+  return png;
+}
+
+async function decryptedBlob(conversationId: string, file: AttachmentMeta) {
+  const bytes = await decryptAttachment(conversationId, file);
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return new Blob([copy], { type: file.type || "application/octet-stream" });
 }
 
 async function decryptAttachment(conversationId: string, file: AttachmentMeta) {
@@ -1377,6 +1417,27 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     }
   }
 
+  async function attachPastedPhoto(file: File) {
+    if (file.size === 0) {
+      setSendError("That file is empty.");
+      return;
+    }
+    if (file.size > 8 * 1024 * 1024) {
+      setSendError("Files need to be 8 MB or smaller.");
+      return;
+    }
+    const photo = await preparePhoto(file);
+    attachReady(photo ?? file);
+  }
+
+  function onComposerPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    if (recording || editing) return;
+    const file = pastedImage(event.clipboardData);
+    if (!file) return;
+    event.preventDefault();
+    void attachPastedPhoto(file);
+  }
+
   function rememberReply(conversationId: string, quote: QuotedMessage | null) {
     repliesRef.current[conversationId] = quote;
     if (activeIdRef.current === conversationId) setReplyTo(quote);
@@ -1421,8 +1482,20 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
 
   async function copyMessage(message: ChatMessage) {
     const text = message.text.trim() || (message.file ? fileLabel(message.file) : "");
-    if (!text) return;
+    const photo = message.file && isPreviewableImage(message.file.type) ? message.file : null;
+    if (!text && !photo) return;
     setActionMenu(null);
+    if (photo && typeof ClipboardItem !== "undefined" && navigator.clipboard?.write) {
+      try {
+        const png = photoPngBlob(message);
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+        markCopied(message.nonce);
+        return;
+      } catch {
+        // The photo could not be placed on the clipboard, so copy its caption instead.
+      }
+    }
+    if (!text) return;
     try {
       await navigator.clipboard.writeText(text);
     } catch {
@@ -1436,8 +1509,12 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
       document.execCommand("copy");
       area.remove();
     }
-    setCopiedNonce(message.nonce);
-    window.setTimeout(() => setCopiedNonce((current) => (current === message.nonce ? null : current)), 1500);
+    markCopied(message.nonce);
+  }
+
+  function markCopied(nonce: string) {
+    setCopiedNonce(nonce);
+    window.setTimeout(() => setCopiedNonce((current) => (current === nonce ? null : current)), 1500);
   }
 
   function beginReply(message: ChatMessage) {
@@ -2349,6 +2426,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                   placeholder={recording ? "Recording a voice message" : editing ? (editing.file ? "Edit caption" : "Edit message") : pendingFile ? "Add a caption" : replyTo ? "Reply" : "Message"}
                   onChange={(event) => updateDraft(event.target.value)}
                   onKeyDown={onComposerKey}
+                  onPaste={onComposerPaste}
                   maxLength={4000}
                 />
                 <button
