@@ -71,6 +71,13 @@ export type MessageReaction = {
   emoji: string;
 };
 
+export type MessagePin = {
+  messageId: string;
+  pinnedBy: string;
+  pinnedAt: string;
+  message: StoredMessage;
+};
+
 export type MemberUser = PublicUser & { role: "admin" | "member" };
 
 export type ConversationSummary = {
@@ -224,6 +231,17 @@ export function openDatabase(dbPath: string) {
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
 
+    CREATE TABLE IF NOT EXISTS pins (
+      conversation_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      pinned_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (conversation_id, message_id),
+      FOREIGN KEY (conversation_id) REFERENCES conversations(id),
+      FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE,
+      FOREIGN KEY (pinned_by) REFERENCES users(id)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
     CREATE INDEX IF NOT EXISTS idx_members_user ON members(user_id);
@@ -375,6 +393,15 @@ export function openDatabase(dbPath: string) {
     ON CONFLICT (message_id, user_id) DO UPDATE SET emoji = excluded.emoji, created_at = excluded.created_at
   `);
   const deleteReaction = db.prepare("DELETE FROM reactions WHERE message_id = ? AND user_id = ?");
+  const listPinRows = db.prepare(
+    "SELECT message_id, pinned_by, created_at FROM pins WHERE conversation_id = ? ORDER BY created_at ASC",
+  );
+  const pinByMessage = db.prepare("SELECT message_id FROM pins WHERE conversation_id = ? AND message_id = ?");
+  const pinCount = db.prepare("SELECT COUNT(*) AS count FROM pins WHERE conversation_id = ?");
+  const insertPin = db.prepare(
+    "INSERT INTO pins (conversation_id, message_id, pinned_by, created_at) VALUES (?, ?, ?, ?)",
+  );
+  const deletePin = db.prepare("DELETE FROM pins WHERE conversation_id = ? AND message_id = ?");
   const replaceMessageRow = db.prepare(`
     UPDATE messages SET
       recipient_eph_public = ?, recipient_iv = ?, recipient_ciphertext = ?,
@@ -456,6 +483,23 @@ export function openDatabase(dbPath: string) {
 
   function withReactions(message: StoredMessage): StoredMessage {
     return { ...message, reactions: reactionsOf(message.id) };
+  }
+
+  function pinsOf(conversationId: string, viewerId: string): MessagePin[] {
+    const kind = kindOf(conversationId);
+    const rows = listPinRows.all(conversationId) as Array<{ message_id: string; pinned_by: string; created_at: string }>;
+    const pins: MessagePin[] = [];
+    for (const pin of rows) {
+      const row = messageById.get(pin.message_id) as MessageRow | undefined;
+      if (!row) continue;
+      pins.push({
+        messageId: pin.message_id,
+        pinnedBy: pin.pinned_by,
+        pinnedAt: pin.created_at,
+        message: presentRow(row, viewerId, kind),
+      });
+    }
+    return pins;
   }
 
   function presentRow(row: MessageRow, viewerId: string, kind: "direct" | "group"): StoredMessage {
@@ -701,7 +745,33 @@ export function openDatabase(dbPath: string) {
       return {
         messages: rows.slice(0, limit).reverse().map((row) => presentRow(row, userId, kind)),
         hasMore,
+        pins: pinsOf(conversationId, userId),
       };
+    },
+    listPins(conversationId: string, userId: string) {
+      if (!memberExists.get(conversationId, userId)) return [];
+      return pinsOf(conversationId, userId);
+    },
+    setPin(conversationId: string, messageId: string, userId: string, pinned: boolean) {
+      const row = messageById.get(messageId) as MessageRow | undefined;
+      if (!row || row.conversation_id !== conversationId || !memberExists.get(conversationId, userId)) return null;
+      let limited = false;
+      withTransaction(() => {
+        if (!pinned) {
+          deletePin.run(conversationId, messageId);
+          return;
+        }
+        const existing = pinByMessage.get(conversationId, messageId) as { message_id: string } | undefined;
+        if (existing) return;
+        const count = pinCount.get(conversationId) as { count: number };
+        if (Number(count.count) >= 5) {
+          limited = true;
+          return;
+        }
+        insertPin.run(conversationId, messageId, userId, new Date().toISOString());
+      });
+      if (limited) return { limit: true as const };
+      return { pins: pinsOf(conversationId, userId) };
     },
     getMessage(messageId: string) {
       const row = messageById.get(messageId) as MessageRow | undefined;

@@ -35,10 +35,12 @@ import {
   editMessage,
   deleteMessage,
   setCollectsReplies,
+  setMessagePin,
   setReaction,
   uploadAttachment,
   type Account,
   type Conversation,
+  type MessagePin,
   type MessageReaction,
   type ServerMessage,
 } from "../api";
@@ -61,6 +63,13 @@ type ChatMessage = ServerMessage & {
   pending?: boolean;
 };
 
+type ChatPin = {
+  messageId: string;
+  pinnedBy: string;
+  pinnedAt: string;
+  message: ChatMessage;
+};
+
 type WsEvent =
   | { type: "hello"; onlineUserIds: string[] }
   | { type: "presence"; userId: string; online: boolean }
@@ -71,6 +80,7 @@ type WsEvent =
   | { type: "delete"; conversationId: string; messageId: string; nonce: string; senderId: string; lastMessageAt: string | null; unreadCount?: number }
   | { type: "collect"; conversationId: string; messageId: string; nonce: string; collects: boolean }
   | { type: "react"; conversationId: string; messageId: string; nonce: string; reactions: MessageReaction[] }
+  | { type: "pins"; conversationId: string; pins: MessagePin[] }
   | { type: "conversation"; conversation: Conversation }
   | { type: "removed"; conversationId: string }
   | { type: "keys"; userId: string; ecdhPublic: string; ecdsaPublic: string };
@@ -455,6 +465,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Record<string, ChatMessage[]>>({});
+  const [pins, setPins] = useState<Record<string, ChatPin[]>>({});
   const [hasMore, setHasMore] = useState<Record<string, boolean>>({});
   const [previews, setPreviews] = useState<Record<string, string>>({});
   const [draft, setDraft] = useState("");
@@ -572,10 +583,23 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     };
   }, []);
 
+  async function showPins(conversation: Conversation, incoming: MessagePin[]) {
+    const revealed = await Promise.all(
+      incoming.map(async (pin) => ({
+        messageId: pin.messageId,
+        pinnedBy: pin.pinnedBy,
+        pinnedAt: pin.pinnedAt,
+        message: await revealMessage(pin.message, conversation, identityRef.current, user.id),
+      })),
+    );
+    setPins((current) => ({ ...current, [conversation.id]: revealed }));
+  }
+
   useEffect(() => {
     let cancelled = false;
     loadedRef.current.clear();
     setMessages({});
+    setPins({});
     listConversations()
       .then(async ({ conversations: list }) => {
         if (cancelled) return;
@@ -600,6 +624,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
           loadedRef.current.add(still.id);
           setHasMore((current) => ({ ...current, [still.id]: page.hasMore }));
           setMessages((current) => ({ ...current, [still.id]: revealed }));
+          await showPins(still, page.pins ?? []);
         }
       })
       .catch((error: unknown) => {
@@ -717,6 +742,12 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
       ...current,
       [event.conversationId]: (current[event.conversationId] ?? []).filter(
         (item) => item.id !== event.messageId && item.nonce !== event.nonce,
+      ),
+    }));
+    setPins((current) => ({
+      ...current,
+      [event.conversationId]: (current[event.conversationId] ?? []).filter(
+        (pin) => pin.messageId !== event.messageId && pin.message.nonce !== event.nonce,
       ),
     }));
     const stash = editStashRef.current[event.conversationId];
@@ -839,6 +870,11 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
       }
       return;
     }
+    if (event.type === "pins") {
+      const conversation = conversationsRef.current.find((item) => item.id === event.conversationId);
+      if (conversation) await showPins(conversation, event.pins);
+      return;
+    }
     if (event.type === "react") {
       setMessages((current) => ({
         ...current,
@@ -929,6 +965,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
       merged.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
       setHasMore((current) => ({ ...current, [conversation.id]: page.hasMore }));
       setMessages((current) => ({ ...current, [conversation.id]: merged }));
+      await showPins(conversation, page.pins ?? []);
       return merged;
     } catch (error) {
       loadedRef.current.delete(conversation.id);
@@ -1015,6 +1052,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
         merged.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
         return { ...current, [active.id]: merged };
       });
+      await showPins(active, page.pins ?? []);
       requestAnimationFrame(() => {
         if (el) el.scrollTop = el.scrollHeight - previousHeight;
       });
@@ -1052,6 +1090,12 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
   function absorbEdit(conversationId: string, incoming: ChatMessage) {
     const merged = mergeMessage(messagesRef.current[conversationId] ?? [], incoming);
     setMessages((current) => ({ ...current, [conversationId]: mergeMessage(current[conversationId] ?? [], incoming) }));
+    setPins((current) => ({
+      ...current,
+      [conversationId]: (current[conversationId] ?? []).map((pin) =>
+        pin.messageId === incoming.id || pin.message.nonce === incoming.nonce ? { ...pin, message: { ...pin.message, ...incoming } } : pin,
+      ),
+    }));
     const last = merged[merged.length - 1];
     const conversation = conversationsRef.current.find((item) => item.id === conversationId);
     const matchesLast = conversation?.lastMessage?.id === incoming.id || conversation?.lastMessage?.nonce === incoming.nonce;
@@ -1572,6 +1616,55 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
       }
       return [...current, message.nonce];
     });
+  }
+
+  async function focusPin(pin: ChatPin) {
+    if (!active) return;
+    const nonce = pin.message.nonce;
+    let items = messagesRef.current[active.id] ?? [];
+    let guard = 0;
+    while (!items.some((item) => item.nonce === nonce) && guard < 15) {
+      const oldest = items[0];
+      if (!oldest) break;
+      const page = await listMessages(active.id, oldest.createdAt);
+      if (page.messages.length === 0) break;
+      const revealed = await Promise.all(page.messages.map((message) => revealMessage(message, active, identityRef.current, user.id)));
+      const merged = [...revealed];
+      for (const item of items) {
+        if (!merged.some((message) => message.nonce === item.nonce)) merged.push(item);
+      }
+      merged.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      items = merged;
+      setHasMore((current) => ({ ...current, [active.id]: page.hasMore }));
+      setMessages((current) => ({ ...current, [active.id]: merged }));
+      if (!page.hasMore) break;
+      guard += 1;
+    }
+    const byNonce = new Map(items.map((item) => [item.nonce, item]));
+    const target = byNonce.get(nonce);
+    if (target) {
+      const parent = collectorNonce(target, byNonce);
+      if (parent) setOpenFolders((current) => ({ ...current, [parent]: true }));
+    }
+    requestAnimationFrame(() => requestAnimationFrame(() => focusQuoted(nonce)));
+  }
+
+  async function togglePin(message: ChatMessage) {
+    if (!active || message.pending || message.id.startsWith("local:") || message.failed) return;
+    setActionMenu(null);
+    const currentPins = pins[active.id] ?? [];
+    const pinned = currentPins.some((pin) => pin.messageId === message.id);
+    if (!pinned && currentPins.length >= 5) {
+      setSendError("This chat already has 5 pinned messages. Unpin one first.");
+      return;
+    }
+    try {
+      const saved = await setMessagePin(active.id, message.id, !pinned);
+      await showPins(active, saved.pins);
+      setSendError("");
+    } catch (error) {
+      setSendError(error instanceof Error ? error.message : "Couldn't pin that message.");
+    }
   }
 
   function beginSelect(message: ChatMessage) {
@@ -2281,6 +2374,24 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                 </button>
               </label>
             </div>
+            {(pins[active.id] ?? []).length > 0 && (
+              <div className="pin-bar" aria-label="Pinned messages">
+                <p className="pin-count">Pinned {(pins[active.id] ?? []).length}/5</p>
+                {(pins[active.id] ?? []).map((pin, index) => {
+                  const live = activeMessages.find((message) => message.id === pin.messageId || message.nonce === pin.message.nonce);
+                  const shown = live ?? pin.message;
+                  return (
+                    <button type="button" className="pin-note" key={pin.messageId} onClick={() => void focusPin({ ...pin, message: shown })}>
+                      <span className="pin-index">{index + 1}</span>
+                      <span className="pin-copy">
+                        <strong>Pinned by {personName(active, pin.pinnedBy, user.id)}</strong>
+                        <em>{previewText(shown) || "Message"}</em>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
             <div
               className="messages"
               ref={scrollerRef}
@@ -2354,6 +2465,10 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                         <p>Unable to decrypt this message.</p>
                       ) : (
                         <>
+                          {(() => {
+                            const pinIndex = (pins[active.id] ?? []).findIndex((pin) => pin.messageId === message.id);
+                            return pinIndex >= 0 ? <p className="forwarded-label">Pinned · {pinIndex + 1}</p> : null;
+                          })()}
                           {message.forwarded && <p className="forwarded-label">Forwarded</p>}
                           {message.reply && !nested && (
                             <button type="button" className="quote" onClick={() => focusQuoted(message.reply!.id)}>
@@ -2393,6 +2508,11 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                                   <button type="button" role="menuitem" onClick={() => { setActionMenu(null); beginForward([message]); }}>Forward</button>
                                   <button type="button" role="menuitem" onClick={() => beginSelect(message)}>Select</button>
                                   <button type="button" role="menuitem" onClick={() => void shareMessages([message])}>Share</button>
+                                  {saved && !message.failed && (
+                                    <button type="button" role="menuitem" onClick={() => void togglePin(message)}>
+                                      {(pins[active.id] ?? []).some((pin) => pin.messageId === message.id) ? "Unpin" : "Pin"}
+                                    </button>
+                                  )}
                                 </>
                               )}
                               {canEdit && (

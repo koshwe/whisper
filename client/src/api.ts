@@ -37,6 +37,13 @@ export type MessageReaction = {
   emoji: string;
 };
 
+export type MessagePin = {
+  messageId: string;
+  pinnedBy: string;
+  pinnedAt: string;
+  message: ServerMessage;
+};
+
 export type MemberUser = PublicUser & { role: "admin" | "member" };
 
 export type Conversation = {
@@ -152,7 +159,7 @@ export function openConversation(username: string) {
 
 export function listMessages(conversationId: string, before?: string) {
   const query = before ? `?before=${encodeURIComponent(before)}` : "";
-  return request<{ messages: ServerMessage[]; hasMore: boolean }>(`/api/conversations/${conversationId}/messages${query}`);
+  return request<{ messages: ServerMessage[]; hasMore: boolean; pins: MessagePin[] }>(`/api/conversations/${conversationId}/messages${query}`);
 }
 
 export function sendMessage(conversationId: string, envelope: MessageEnvelope | GroupEnvelope) {
@@ -174,6 +181,13 @@ export function deleteMessage(conversationId: string, messageId: string, attachm
     `/api/conversations/${conversationId}/messages/${messageId}`,
     { method: "DELETE", body: JSON.stringify({ attachmentId: attachmentId ?? null }) },
   );
+}
+
+export function setMessagePin(conversationId: string, messageId: string, pinned: boolean) {
+  return request<{ pins: MessagePin[] }>(`/api/conversations/${conversationId}/messages/${messageId}/pin`, {
+    method: "POST",
+    body: JSON.stringify({ pinned }),
+  });
 }
 
 export function setReaction(conversationId: string, messageId: string, emoji: string | null) {

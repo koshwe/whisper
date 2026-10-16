@@ -40,6 +40,7 @@ Each account has an encryption key pair and a signing key pair, generated in the
 - Pictures and documents are encrypted with their own key before upload. The filename and that key travel inside the encrypted message, so the stored file is ciphertext. Each file can be up to 8 MB. A picture can be rotated and cropped in the browser before it is sent, including a photo just taken with the phone camera.
 - Voice messages are recorded in the browser and encrypted the same way before upload. A recording can be up to 3 minutes.
 - Replies and forwards are part of that same encrypted message. A reply stores a short quote. A forward copies the text, and any file is encrypted again for the destination chat.
+- A chat can pin up to five messages. Everyone in the chat sees the same pins, numbered, with a short preview of who pinned each one. The pin only records which message it is; the text stays encrypted.
 - Deleting a message removes its ciphertext for both people. A picture, document, or voice message attached to it is removed too.
 - Editing a message replaces its ciphertext for both people and marks it edited. The original time stays. Only the sender can edit.
 - Collect replies turns a message into a folder. Replies, including pictures, show on the folder. Open the folder to read them. Both people see the same folder.

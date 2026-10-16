@@ -221,6 +221,12 @@ export function registerRoutes(app: Express, db: WhisperDb, filesDir: string) {
     for (const memberId of db.listMemberIds(conversationId)) sendToUser(memberId, event);
   }
 
+  function publishPins(conversationId: string) {
+    for (const memberId of db.listMemberIds(conversationId)) {
+      sendToUser(memberId, { type: "pins", conversationId, pins: db.listPins(conversationId, memberId) });
+    }
+  }
+
   app.get("/api/health", (_req, res) => {
     res.json({ ok: true });
   });
@@ -796,6 +802,23 @@ export function registerRoutes(app: Express, db: WhisperDb, filesDir: string) {
         reactions: saved.reactions,
       });
       res.json({ reactions: saved.reactions });
+    }),
+  );
+
+  app.post(
+    "/api/conversations/:id/messages/:messageId/pin",
+    asyncRoute(async (req, res) => {
+      const user = currentUser(req, db);
+      const conversationId = req.params.id;
+      const conversation = db.getConversation(conversationId, user.id);
+      if (!conversation) throw new HttpError(404, "Chat not found.");
+      const pinned = (req.body as { pinned?: unknown }).pinned;
+      if (typeof pinned !== "boolean") throw new HttpError(400, "Choose whether to pin this message.");
+      const saved = db.setPin(conversationId, req.params.messageId, user.id, pinned);
+      if (!saved) throw new HttpError(404, "Message not found.");
+      if ("limit" in saved) throw new HttpError(400, "This chat already has 5 pinned messages.");
+      publishPins(conversationId);
+      res.json({ pins: saved.pins });
     }),
   );
 

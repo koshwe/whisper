@@ -162,6 +162,77 @@ test("relays ciphertext and leaves the server unable to read it", async () => {
     });
     assert.equal(clearedReaction.status, 200);
 
+    const pinned = await fetch(`${base}/api/conversations/${conversationId}/messages/${stored.id}/pin`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${alice.token}` },
+      body: JSON.stringify({ pinned: true }),
+    });
+    const pinnedBody = (await pinned.json()) as { pins?: Array<{ messageId: string; pinnedBy: string }>; error?: string };
+    assert.equal(pinned.status, 200, pinnedBody.error);
+    assert.equal(pinnedBody.pins?.length, 1);
+    assert.equal(pinnedBody.pins?.[0]?.messageId, stored.id);
+    assert.equal(pinnedBody.pins?.[0]?.pinnedBy, alice.user.id);
+    const seenPins = await fetch(`${base}/api/conversations/${conversationId}/messages`, {
+      headers: { Authorization: `Bearer ${bob.token}` },
+    });
+    const seenPinBody = (await seenPins.json()) as { pins: Array<{ messageId: string }> };
+    assert.equal(seenPinBody.pins.length, 1);
+    assert.equal(JSON.stringify(seenPinBody).includes(secret), false);
+    const extraIds: string[] = [];
+    for (let index = 0; index < 4; index += 1) {
+      const extra = await encryptMessage({
+        identity: aliceKeys,
+        recipientEcdhPublic: bob.user.ecdhPublic,
+        conversationId,
+        senderId: alice.user.id,
+        plaintext: `pin-note-${index}`,
+      });
+      const extraSent = await fetch(`${base}/api/conversations/${conversationId}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${alice.token}` },
+        body: JSON.stringify(extra),
+      });
+      const extraBody = (await extraSent.json()) as { message: { id: string }; error?: string };
+      assert.equal(extraSent.status, 201, extraBody.error);
+      extraIds.push(extraBody.message.id);
+      const extraPin = await fetch(`${base}/api/conversations/${conversationId}/messages/${extraBody.message.id}/pin`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${bob.token}` },
+        body: JSON.stringify({ pinned: true }),
+      });
+      assert.equal(extraPin.status, 200);
+    }
+    const overflow = await encryptMessage({
+      identity: aliceKeys,
+      recipientEcdhPublic: bob.user.ecdhPublic,
+      conversationId,
+      senderId: alice.user.id,
+      plaintext: "pin-note-overflow",
+    });
+    const overflowSent = await fetch(`${base}/api/conversations/${conversationId}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${alice.token}` },
+      body: JSON.stringify(overflow),
+    });
+    const overflowBody = (await overflowSent.json()) as { message: { id: string }; error?: string };
+    assert.equal(overflowSent.status, 201, overflowBody.error);
+    const rejectedPin = await fetch(`${base}/api/conversations/${conversationId}/messages/${overflowBody.message.id}/pin`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${alice.token}` },
+      body: JSON.stringify({ pinned: true }),
+    });
+    assert.equal(rejectedPin.status, 400);
+    const unpinned = await fetch(`${base}/api/conversations/${conversationId}/messages/${stored.id}/pin`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${alice.token}` },
+      body: JSON.stringify({ pinned: false }),
+    });
+    const unpinnedBody = (await unpinned.json()) as { pins: Array<{ messageId: string }>; error?: string };
+    assert.equal(unpinned.status, 200, unpinnedBody.error);
+    assert.equal(unpinnedBody.pins.length, 4);
+    assert.equal(unpinnedBody.pins.some((pin) => pin.messageId === stored.id), false);
+    assert.equal(extraIds.length, 4);
+
     const tampered = await fetch(`${base}/api/conversations/${conversationId}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${alice.token}` },
