@@ -1,4 +1,4 @@
-import { createReadStream, existsSync } from "node:fs";
+import { createReadStream, existsSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,7 +32,8 @@ const proxy = {
 
 function serveApk(): Plugin {
   const files = new Map([
-    ["/Whisper.apk", path.join(root, "public", "Whisper.apk")],
+    ["/Whisper.apk", path.join(root, "public", "Whisper-1.5.apk")],
+    ["/Whisper-1.5.apk", path.join(root, "public", "Whisper-1.5.apk")],
     ["/InstallTest.apk", path.join(root, "public", "InstallTest.apk")],
   ]);
   return {
@@ -43,7 +44,9 @@ function serveApk(): Plugin {
         const file = url ? files.get(url) : undefined;
         if (!file || !existsSync(file)) return next();
         res.setHeader("Content-Type", "application/vnd.android.package-archive");
+        res.setHeader("Content-Length", statSync(file).size);
         res.setHeader("Content-Disposition", `attachment; filename="${path.basename(file)}"`);
+        res.setHeader("Cache-Control", "no-store");
         createReadStream(file).pipe(res);
       });
     },

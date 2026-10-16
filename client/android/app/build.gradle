@@ -10,11 +10,11 @@ android {
     namespace = "com.koshwe.whisper"
     compileSdk = rootProject.ext.compileSdkVersion
     defaultConfig {
-        applicationId "com.koshwe.whisperapp"
+        applicationId "com.koshwe.whisperchat"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 4
-        versionName "1.3"
+        versionCode 5
+        versionName "1.5"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -27,6 +27,7 @@ android {
             // v1 as well as v2, so phone file managers can install the package.
             v1SigningEnabled true
             v2SigningEnabled true
+            enableV3Signing = true
         }
         release {
             if (keystorePropertiesFile.exists()) {
@@ -36,6 +37,7 @@ android {
                 keyPassword keystoreProperties['keyPassword']
                 v1SigningEnabled true
                 v2SigningEnabled true
+                enableV3Signing = true
             }
         }
     }
@@ -44,6 +46,11 @@ android {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
             signingConfig signingConfigs.release
+        }
+    }
+    packaging {
+        resources {
+            excludes += ["assets/dexopt/baseline.prof", "assets/dexopt/baseline.profm"]
         }
     }
 }
