@@ -178,6 +178,22 @@ button { cursor: pointer; }
 .message-row.out > .react-tools .react-row { left: auto; right: 0; }
 .message-row.in .folder-replies .react-tools .react-row { left: 0; right: auto; }
 .message-row.out .folder-replies .react-tools .react-row { left: auto; right: 0; }
+.select-line { display: flex; align-items: center; gap: 8px; width: 100%; }
+.select-line.in { justify-content: flex-start; }
+.select-line.out { justify-content: flex-end; }
+.select-line.picked .bubble { outline: 2px solid var(--accent); }
+.pick {
+  width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--muted);
+  background: transparent; color: var(--accent-ink); padding: 0; flex: none; font-size: 13px;
+}
+.pick.on { background: var(--accent); border-color: var(--accent); }
+.selection-bar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 12px 16px 16px; background: var(--sidebar);
+}
+.selection-bar strong { flex: 1; min-width: 80px; }
+.selection-bar .error { flex: 1 0 100%; margin: 0; }
+.selection-bar .send { width: auto; }
 .react-row button { border: 0; background: transparent; font-size: 18px; line-height: 1; padding: 4px; border-radius: 8px; }
 .react-more { color: var(--muted); font-size: 16px; font-weight: 700; width: 28px; }
 .react-row input { width: 32px; border: 0; background: transparent; font-size: 18px; text-align: center; padding: 0; }

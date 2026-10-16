@@ -466,7 +466,10 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
   const [recordMs, setRecordMs] = useState(0);
   const [replyTo, setReplyTo] = useState<QuotedMessage | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [forwardSource, setForwardSource] = useState<ChatMessage | null>(null);
+  const [forwardSources, setForwardSources] = useState<ChatMessage[]>([]);
+  const [selectedNonces, setSelectedNonces] = useState<string[]>([]);
+  const [sharing, setSharing] = useState(false);
+  const [shareError, setShareError] = useState("");
   const [forwardLookup, setForwardLookup] = useState("");
   const [forwardError, setForwardError] = useState("");
   const [forwarding, setForwarding] = useState(false);
@@ -629,6 +632,18 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
       cancelled = true;
     };
   }, [dialog, identity.ecdsaPublic]);
+
+  useEffect(() => {
+    if (selectedNonces.length === 0) return;
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setSelectedNonces([]);
+        setShareError("");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectedNonces.length]);
 
   useEffect(() => {
     if (!dialog) return;
@@ -967,6 +982,8 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     setActionMenu(null);
     setReactMenu(null);
     setEmojiPick("");
+    setSelectedNonces([]);
+    setShareError("");
     setMobileThread(true);
     setSendError("");
     setPhotoFile(null);
@@ -1535,9 +1552,40 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     textareaRef.current?.focus();
   }
 
-  function beginForward(message: ChatMessage) {
-    if (message.failed || (!message.text.trim() && !message.file)) return;
-    setForwardSource(message);
+  function canSelect(message: ChatMessage) {
+    return !message.failed && Boolean(message.text.trim() || message.file);
+  }
+
+  function clearSelection() {
+    setSelectedNonces([]);
+    setShareError("");
+  }
+
+  function toggleSelected(message: ChatMessage) {
+    if (!canSelect(message)) return;
+    setShareError("");
+    setSelectedNonces((current) => {
+      if (current.includes(message.nonce)) return current.filter((nonce) => nonce !== message.nonce);
+      if (current.length >= 20) {
+        setShareError("You can select up to 20 messages.");
+        return current;
+      }
+      return [...current, message.nonce];
+    });
+  }
+
+  function beginSelect(message: ChatMessage) {
+    if (!canSelect(message)) return;
+    setActionMenu(null);
+    setReactMenu(null);
+    setShareError("");
+    setSelectedNonces([message.nonce]);
+  }
+
+  function beginForward(messages: ChatMessage[]) {
+    const sources = messages.filter(canSelect);
+    if (sources.length === 0) return;
+    setForwardSources(sources);
     setForwardLookup("");
     setForwardError("");
     setDialog("forward");
@@ -1620,67 +1668,163 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     }
   }
 
-  function noteForwarded(name: string) {
-    setForwardNote(`Forwarded to ${name}`);
+  function noteForwarded(name: string, count = 1) {
+    setForwardNote(count > 1 ? `Forwarded ${count} messages to ${name}` : `Forwarded to ${name}`);
     window.clearTimeout(forwardNoteTimer.current);
     forwardNoteTimer.current = window.setTimeout(() => setForwardNote(""), 4000);
   }
 
+  async function forwardOne(target: Conversation, source: ChatMessage) {
+    let attachment: AttachmentMeta | null = null;
+    if (source.file) {
+      const bytes = await decryptAttachment(source.conversationId, source.file);
+      const encrypted = await encryptFile(bytes);
+      const digest = await sha256Base64(encrypted.ciphertext);
+      const uploaded = await uploadAttachment(target.id, encrypted.ciphertext);
+      attachment = {
+        id: uploaded.id,
+        name: source.file.name,
+        type: source.file.type,
+        size: source.file.size,
+        key: encrypted.key,
+        iv: encrypted.iv,
+        sha256: digest,
+        ...(source.file.voice ? { voice: true, durationMs: source.file.durationMs } : {}),
+      };
+    }
+    const envelope = await sealFor(target, packPayload({ text: source.text.trim(), file: attachment, forwarded: true }));
+    const { message } = await sendMessage(target.id, envelope);
+    const revealed: ChatMessage = {
+      ...message,
+      text: source.text.trim(),
+      file: attachment,
+      reply: null,
+      forwarded: true,
+      failed: false,
+    };
+    setMessages((current) => ({ ...current, [target.id]: mergeMessage(current[target.id] ?? [], revealed) }));
+    setPreviews((current) => ({ ...current, [target.id]: previewText(revealed) }));
+    const next = conversationsRef.current.map((item) =>
+      item.id === target.id ? { ...item, lastMessageAt: message.createdAt, lastMessage: message } : item,
+    );
+    if (!next.some((item) => item.id === target.id)) {
+      next.unshift({ ...target, lastMessageAt: message.createdAt, lastMessage: message, unreadCount: 0 });
+    }
+    next.sort((a, b) => (b.lastMessageAt ?? b.createdAt).localeCompare(a.lastMessageAt ?? a.createdAt));
+    replaceConversations(next);
+    if (activeIdRef.current === target.id) stickRef.current = true;
+  }
+
   async function deliverForward(target: Conversation) {
-    const source = forwardSource;
-    if (!source || forwarding) return;
+    const sources = [...forwardSources].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    if (sources.length === 0 || forwarding) return;
     if (!readyToSeal(target)) {
       setForwardError(target.kind === "group" ? "Someone in the group hasn't finished setting up encryption yet." : "That person hasn't finished setting up encryption yet.");
       return;
     }
     setForwarding(true);
     setForwardError("");
+    let sent = 0;
     try {
-      let attachment: AttachmentMeta | null = null;
-      if (source.file) {
-        const bytes = await decryptAttachment(source.conversationId, source.file);
-        const encrypted = await encryptFile(bytes);
-        const digest = await sha256Base64(encrypted.ciphertext);
-        const uploaded = await uploadAttachment(target.id, encrypted.ciphertext);
-        attachment = {
-          id: uploaded.id,
-          name: source.file.name,
-          type: source.file.type,
-          size: source.file.size,
-          key: encrypted.key,
-          iv: encrypted.iv,
-          sha256: digest,
-          ...(source.file.voice ? { voice: true, durationMs: source.file.durationMs } : {}),
-        };
+      for (const source of sources) {
+        await forwardOne(target, source);
+        sent += 1;
       }
-      const envelope = await sealFor(target, packPayload({ text: source.text.trim(), file: attachment, forwarded: true }));
-      const { message } = await sendMessage(target.id, envelope);
-      const revealed: ChatMessage = {
-        ...message,
-        text: source.text.trim(),
-        file: attachment,
-        reply: null,
-        forwarded: true,
-        failed: false,
-      };
-      setMessages((current) => ({ ...current, [target.id]: mergeMessage(current[target.id] ?? [], revealed) }));
-      setPreviews((current) => ({ ...current, [target.id]: previewText(revealed) }));
-      const next = conversationsRef.current.map((item) =>
-        item.id === target.id ? { ...item, lastMessageAt: message.createdAt, lastMessage: message } : item,
-      );
-      if (!next.some((item) => item.id === target.id)) {
-        next.unshift({ ...target, lastMessageAt: message.createdAt, lastMessage: message, unreadCount: 0 });
-      }
-      next.sort((a, b) => (b.lastMessageAt ?? b.createdAt).localeCompare(a.lastMessageAt ?? a.createdAt));
-      replaceConversations(next);
-      if (activeIdRef.current === target.id) stickRef.current = true;
       setDialog(null);
-      setForwardSource(null);
-      noteForwarded(chatTitle(target));
+      setForwardSources([]);
+      clearSelection();
+      noteForwarded(chatTitle(target), sources.length);
     } catch (error) {
-      setForwardError(error instanceof Error ? error.message : "Couldn't forward that message.");
+      const remaining = sources.slice(sent);
+      setForwardSources(remaining);
+      setForwardError(
+        sent > 0
+          ? `Sent ${sent}. ${error instanceof Error ? error.message : "The rest weren't forwarded."}`
+          : error instanceof Error ? error.message : "Couldn't forward that message.",
+      );
     } finally {
       setForwarding(false);
+    }
+  }
+
+  async function messageFile(message: ChatMessage) {
+    if (!message.file) return null;
+    let blob: Blob;
+    if (message.localUrl) {
+      try {
+        blob = await (await fetch(message.localUrl)).blob();
+      } catch {
+        blob = await decryptedBlob(message.conversationId, message.file);
+      }
+    } else {
+      blob = await decryptedBlob(message.conversationId, message.file);
+    }
+    const type = message.file.voice ? playbackType(message.file.type) : blob.type || message.file.type || "application/octet-stream";
+    return new File([blob], safeFileName(message.file.name), { type });
+  }
+
+  function shareLines(conversation: Conversation, messages: ChatMessage[]) {
+    return messages.map((message) => {
+      const who = personName(conversation, message.senderId, user.id);
+      const caption = message.text.replace(/\s+/g, " ").trim();
+      const label = message.file ? fileLabel(message.file) : "";
+      return `${who}: ${caption || label}`;
+    }).filter((line) => !line.endsWith(": "));
+  }
+
+  async function shareMessages(messages: ChatMessage[]) {
+    const sources = [...messages].filter(canSelect).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    if (sources.length === 0 || sharing || !active) return;
+    const fromSelection = selectedNonces.length > 0;
+    const report = (message: string) => {
+      if (fromSelection) setShareError(message);
+      else setSendError(message);
+    };
+    setSharing(true);
+    setShareError("");
+    if (!fromSelection) setSendError("");
+    setActionMenu(null);
+    const text = shareLines(active, sources).join("\n");
+    try {
+      const files: File[] = [];
+      for (const source of sources) {
+        const file = await messageFile(source);
+        if (file) files.push(file);
+      }
+      if (!text && files.length === 0) return;
+      if (typeof navigator.share === "function") {
+        const withFiles = { text, files };
+        if (files.length > 0 && navigator.canShare?.(withFiles)) {
+          await navigator.share(withFiles);
+        } else if (text) {
+          await navigator.share({ text });
+          if (files.length > 0) setSendError("The text was shared. This device couldn't attach the files.");
+        } else {
+          await navigator.share({ files });
+        }
+        clearSelection();
+        return;
+      }
+      if (text) {
+        await navigator.clipboard.writeText(text);
+        report("This device has no share sheet, so the text was copied.");
+        return;
+      }
+      report("This device can't share files to another app.");
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      if (text) {
+        try {
+          await navigator.clipboard.writeText(text);
+          report("Couldn't open the share sheet, so the text was copied.");
+          return;
+        } catch {
+          // Fall through to the generic error.
+        }
+      }
+      report(error instanceof Error ? error.message : "Couldn't share those messages.");
+    } finally {
+      setSharing(false);
     }
   }
 
@@ -2167,8 +2311,39 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                   const open = Boolean(openFolders[message.nonce]);
                   const showActions = canAct || canDelete || canEdit || saved || (!message.failed && Boolean(message.text.trim() || message.file));
                   const canReact = !message.failed && !message.pending && !message.id.startsWith("local:");
+                  const picking = selectedNonces.length > 0;
+                  const picked = selectedNonces.includes(message.nonce);
                   return (
-                    <article id={`msg-${message.nonce}`} className={`message-row ${mine ? "out" : "in"}${message.id === editingId ? " editing" : ""}${menuUp ? " menu-up" : ""}`}>
+                    <div
+                      className={`select-line ${mine ? "out" : "in"}${picked ? " picked" : ""}${picking ? " picking" : ""}`}
+                      onClick={picking ? (event) => {
+                        event.stopPropagation();
+                        toggleSelected(message);
+                      } : undefined}
+                    >
+                    {picking && (
+                      <button
+                        type="button"
+                        className={picked ? "pick on" : "pick"}
+                        aria-pressed={picked}
+                        aria-label={picked ? "Deselect message" : "Select message"}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          toggleSelected(message);
+                        }}
+                      >
+                        {picked ? "✓" : ""}
+                      </button>
+                    )}
+                    <article
+                      id={`msg-${message.nonce}`}
+                      className={`message-row ${mine ? "out" : "in"}${message.id === editingId ? " editing" : ""}${menuUp ? " menu-up" : ""}`}
+                      onContextMenu={(event) => {
+                        if (!canSelect(message)) return;
+                        event.preventDefault();
+                        if (selectedNonces.length === 0) beginSelect(message);
+                      }}
+                    >
                       <div className={`bubble ${mine ? "out" : "in"}`}>
                       {active.kind === "group" && !mine && !message.failed && (
                         <p className="sender-name">{personName(active, message.senderId, user.id)}</p>
@@ -2193,7 +2368,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                         </>
                       )}
                       </div>
-                      {showActions && (
+                      {showActions && !picking && (
                         <span className="message-tools" onPointerDown={(event) => event.stopPropagation()}>
                           <button
                             type="button"
@@ -2215,7 +2390,9 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                               {canAct && (
                                 <>
                                   <button type="button" role="menuitem" onClick={() => { setActionMenu(null); beginReply(message); }}>Reply</button>
-                                  <button type="button" role="menuitem" onClick={() => { setActionMenu(null); beginForward(message); }}>Forward</button>
+                                  <button type="button" role="menuitem" onClick={() => { setActionMenu(null); beginForward([message]); }}>Forward</button>
+                                  <button type="button" role="menuitem" onClick={() => beginSelect(message)}>Select</button>
+                                  <button type="button" role="menuitem" onClick={() => void shareMessages([message])}>Share</button>
                                 </>
                               )}
                               {canEdit && (
@@ -2280,7 +2457,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                           ))}
                         </span>
                       )}
-                      {canReact && (
+                      {canReact && !picking && (
                         <span className="react-tools" onPointerDown={(event) => event.stopPropagation()}>
                           <button
                             type="button"
@@ -2341,6 +2518,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                         </span>
                       )}
                     </article>
+                    </div>
                   );
                 };
                 return visible.map((message, index) => {
@@ -2364,6 +2542,29 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                 void chooseFile(file);
               }}
             />
+            {activeMessages.some((message) => selectedNonces.includes(message.nonce) && canSelect(message)) ? (
+              <div className="selection-bar">
+                <button type="button" className="text" onClick={clearSelection}>Cancel</button>
+                <strong>{activeMessages.filter((message) => selectedNonces.includes(message.nonce) && canSelect(message)).length} selected</strong>
+                {shareError && <p className="error">{shareError}</p>}
+                <button
+                  type="button"
+                  className="text"
+                  disabled={sharing || forwarding}
+                  onClick={() => void shareMessages(activeMessages.filter((message) => selectedNonces.includes(message.nonce)))}
+                >
+                  {sharing ? "Sharing…" : "Share"}
+                </button>
+                <button
+                  type="button"
+                  className="primary send"
+                  disabled={sharing || forwarding}
+                  onClick={() => beginForward(activeMessages.filter((message) => selectedNonces.includes(message.nonce)))}
+                >
+                  Forward
+                </button>
+              </div>
+            ) : (
             <form
               className="composer"
               onSubmit={(event) => {
@@ -2458,6 +2659,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                 </button>
               </div>
             </form>
+            )}
           </>
         ) : (
           <div className="welcome">
@@ -2524,10 +2726,13 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                 </button>
               </form>
             )}
-            {dialog === "forward" && forwardSource && (
+            {dialog === "forward" && forwardSources.length > 0 && (
               <form onSubmit={(event) => void forwardToUsername(event)}>
-                <h2>Forward message</h2>
-                <p className="hint">{previewText(forwardSource)}</p>
+                <h2>{forwardSources.length > 1 ? `Forward ${forwardSources.length} messages` : "Forward message"}</h2>
+                <p className="hint">
+                  {forwardSources.slice(0, 3).map((message) => previewText(message)).join(", ")}
+                  {forwardSources.length > 3 ? ` and ${forwardSources.length - 3} more` : ""}
+                </p>
                 <label className="field">
                   Send to
                   <input
