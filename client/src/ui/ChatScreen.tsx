@@ -3413,6 +3413,7 @@ function FileAttachment({ conversationId, file, localUrl }: { conversationId: st
   const [url, setUrl] = useState<string | null>(localUrl ?? null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [magnified, setMagnified] = useState(false);
   const owned = useRef<string | null>(null);
   const image = isPreviewableImage(file.type);
 
@@ -3463,8 +3464,21 @@ function FileAttachment({ conversationId, file, localUrl }: { conversationId: st
   }
 
   return (
-    <div className={image ? "attachment image" : "attachment"}>
-      {image && url && <img src={url} alt="Photo" />}
+    <div className={image ? `attachment image${magnified ? " magnified" : ""}` : "attachment"}>
+      {image && url && (
+        <button
+          type="button"
+          className="photo-zoom"
+          aria-pressed={magnified}
+          aria-label={magnified ? "Show photo at normal size" : "Magnify photo"}
+          onClick={(event) => {
+            event.stopPropagation();
+            setMagnified((current) => !current);
+          }}
+        >
+          <img src={url} alt="Photo" />
+        </button>
+      )}
       <div className="file-card">
         <span>
           {!image && <strong>{file.name}</strong>}
