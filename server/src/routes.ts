@@ -487,6 +487,7 @@ export function registerRoutes(app: Express, db: WhisperDb, filesDir: string) {
       const user = currentUser(req, db);
       const conversation = db.getConversation(req.params.id, user.id);
       if (!conversation || conversation.kind !== "group") throw new HttpError(404, "Group not found.");
+      if (!db.isAdmin(conversation.id, user.id)) throw new HttpError(403, "Only the group admin can add people.");
       const username = normalizeUsername((req.body as { username?: unknown }).username);
       if (username === user.username) throw new HttpError(400, "You are already in the group.");
       const person = db.getUserByUsername(username);
@@ -501,6 +502,28 @@ export function registerRoutes(app: Express, db: WhisperDb, filesDir: string) {
       }
       const mine = db.getConversation(conversation.id, user.id);
       res.status(201).json({ conversation: mine ? decorate(mine) : null });
+    }),
+  );
+
+  app.delete(
+    "/api/groups/:id/members/:userId",
+    asyncRoute(async (req, res) => {
+      const user = currentUser(req, db);
+      const conversation = db.getConversation(req.params.id, user.id);
+      if (!conversation || conversation.kind !== "group") throw new HttpError(404, "Group not found.");
+      if (!db.isAdmin(conversation.id, user.id)) throw new HttpError(403, "Only the group admin can remove people.");
+      const targetId = req.params.userId;
+      if (targetId === user.id) throw new HttpError(400, "Leave the group instead of removing yourself.");
+      if (!db.isMember(conversation.id, targetId)) throw new HttpError(404, "That person is not in the group.");
+      if (db.isAdmin(conversation.id, targetId)) throw new HttpError(403, "The admin stays until they leave.");
+      if (!db.removeMember(conversation.id, targetId)) throw new HttpError(404, "That person is not in the group.");
+      sendToUser(targetId, { type: "removed", conversationId: conversation.id });
+      for (const memberId of db.listMemberIds(conversation.id)) {
+        const next = db.getConversation(conversation.id, memberId);
+        if (next) sendToUser(memberId, { type: "conversation", conversation: decorate(next) });
+      }
+      const mine = db.getConversation(conversation.id, user.id);
+      res.json({ conversation: mine ? decorate(mine) : null });
     }),
   );
 

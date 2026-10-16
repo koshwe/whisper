@@ -23,6 +23,7 @@ import {
   createGroup,
   addGroupMember,
   leaveGroup,
+  removeGroupMember,
   downloadAttachment,
   listConversations,
   listMessages,
@@ -795,7 +796,11 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
           return {
             ...conversation,
             peer: apply(conversation.peer),
-            members: conversation.members.map((member) => apply(member) ?? member),
+            members: conversation.members.map((member) =>
+              member.id === event.userId
+                ? { ...member, ecdhPublic: event.ecdhPublic, ecdsaPublic: event.ecdsaPublic, keysReady: true }
+                : member,
+            ),
           };
         }),
       );
@@ -1873,6 +1878,20 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     }
   }
 
+  async function removeMember(userId: string) {
+    if (!active || active.kind !== "group" || active.viewerRole !== "admin" || groupBusy) return;
+    setGroupBusy(true);
+    setGroupError("");
+    try {
+      const { conversation } = await removeGroupMember(active.id, userId);
+      replaceConversations(conversationsRef.current.map((item) => (item.id === conversation.id ? conversation : item)));
+    } catch (error) {
+      setGroupError(error instanceof Error ? error.message : "Couldn't remove that person.");
+    } finally {
+      setGroupBusy(false);
+    }
+  }
+
   async function leaveCurrentGroup() {
     if (!active || active.kind !== "group" || groupBusy) return;
     setGroupBusy(true);
@@ -2564,7 +2583,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
             {dialog === "group" && (
               <form onSubmit={(event) => void startGroup(event)}>
                 <h2>New group</h2>
-                <p className="hint">Add at least two other people. Each message is encrypted separately for everyone in the group. People who join later only see messages sent after they join.</p>
+                <p className="hint">Add at least two other people. You start the group as its admin and can add or remove people later. Each message is encrypted separately for everyone in the group. People who join later only see messages sent after they join.</p>
                 <label className="field">
                   Group name
                   <input value={groupTitle} onChange={(event) => setGroupTitle(event.target.value)} placeholder="Weekend plans" maxLength={40} autoFocus />
@@ -2600,23 +2619,44 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
             {dialog === "people" && active?.kind === "group" && (
               <div>
                 <h2>{chatTitle(active)}</h2>
-                <p className="hint">{active.members.length + 1} people. New members don't receive older messages.</p>
+                <p className="hint">
+                  {active.members.length + 1} people. The admin can add and remove people.
+                  {active.viewerRole === "admin" ? " New members don't receive older messages. If you leave, someone else becomes the admin." : ""}
+                </p>
                 <ul className="people-list">
-                  <li><strong>{user.displayName}</strong> <small>@{user.username} · you</small></li>
+                  <li>
+                    <span>
+                      <strong>{user.displayName}</strong>
+                      <small>@{user.username} · you{active.viewerRole === "admin" ? " · admin" : ""}</small>
+                    </span>
+                  </li>
                   {active.members.map((member) => (
-                    <li key={member.id}><strong>{member.displayName}</strong> <small>@{member.username}</small></li>
+                    <li key={member.id}>
+                      <span>
+                        <strong>{member.displayName}</strong>
+                        <small>@{member.username}{member.role === "admin" ? " · admin" : ""}</small>
+                      </span>
+                      {active.viewerRole === "admin" && member.role !== "admin" && (
+                        <button type="button" className="text danger" disabled={groupBusy} onClick={() => void removeMember(member.id)}>
+                          Remove
+                        </button>
+                      )}
+                    </li>
                   ))}
                 </ul>
-                <form onSubmit={(event) => void inviteMember(event)}>
-                  <label className="field">
-                    Add a username
-                    <input value={groupUser} onChange={(event) => setGroupUser(event.target.value)} placeholder="carol" />
-                  </label>
-                  {groupError && <p className="error">{groupError}</p>}
-                  <button className="primary" type="submit" disabled={groupBusy || !groupUser.trim()}>
-                    {groupBusy ? "Adding…" : "Add person"}
-                  </button>
-                </form>
+                {active.viewerRole === "admin" && (
+                  <form onSubmit={(event) => void inviteMember(event)}>
+                    <label className="field">
+                      Add a username
+                      <input value={groupUser} onChange={(event) => setGroupUser(event.target.value)} placeholder="carol" />
+                    </label>
+                    {groupError && <p className="error">{groupError}</p>}
+                    <button className="primary" type="submit" disabled={groupBusy || !groupUser.trim()}>
+                      {groupBusy ? "Adding…" : "Add person"}
+                    </button>
+                  </form>
+                )}
+                {active.viewerRole !== "admin" && groupError && <p className="error">{groupError}</p>}
                 <button className="text danger" type="button" disabled={groupBusy} onClick={() => void leaveCurrentGroup()}>
                   Leave group
                 </button>

@@ -43,7 +43,7 @@ Each account has an encryption key pair and a signing key pair, generated in the
 - Deleting a message removes its ciphertext for both people. A picture, document, or voice message attached to it is removed too.
 - Editing a message replaces its ciphertext for both people and marks it edited. The original time stays. Only the sender can edit.
 - Collect replies turns a message into a folder. Replies, including pictures, show on the folder. Open the folder to read them. Both people see the same folder.
-- A group chat encrypts each message separately for every current member, up to 16 people. The server stores those copies and cannot read them. Someone who joins later does not receive older messages. The group name is visible to the server, the same way usernames are.
+- A group chat encrypts each message separately for every current member, up to 16 people. The person who starts the group is its admin and can add or remove people later. The server stores those copies and cannot read them. Someone who joins later does not receive older messages. The group name is visible to the server, the same way usernames are.
 - The sender signs the ciphertext. The recipient checks that signature before showing the text.
 - The conversation header shows a safety number. Compare it with the other person on a call or in person.
 

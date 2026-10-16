@@ -403,6 +403,56 @@ test("seals a group message separately for each member", async () => {
     started.db.checkpoint();
     const raw = JSON.stringify(started.db.listMessages(conversationId, alice.user.id, null, 10));
     assert.equal(raw.includes(secret), false);
+
+    const listed = await fetch(`${base}/api/conversations`, { headers: { Authorization: `Bearer ${bob.token}` } });
+    const listedBody = (await listed.json()) as {
+      conversations: Array<{ id: string; viewerRole: string; members: Array<{ id: string; username: string; role: string }> }>;
+    };
+    const bobView = listedBody.conversations.find((item) => item.id === conversationId);
+    assert.equal(bobView?.viewerRole, "member");
+    assert.equal(bobView?.members.find((member) => member.username === "alice")?.role, "admin");
+
+    const blockedAdd = await fetch(`${base}/api/groups/${conversationId}/members`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${bob.token}` },
+      body: JSON.stringify({ username: "dave" }),
+    });
+    assert.equal(blockedAdd.status, 403);
+    const blockedRemove = await fetch(`${base}/api/groups/${conversationId}/members/${carol.user.id}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${bob.token}` },
+    });
+    assert.equal(blockedRemove.status, 403);
+
+    const added = await fetch(`${base}/api/groups/${conversationId}/members`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${alice.token}` },
+      body: JSON.stringify({ username: "dave" }),
+    });
+    const addedBody = (await added.json()) as { error?: string; conversation?: { members: Array<{ username: string }> } };
+    assert.equal(added.status, 201, addedBody.error);
+    assert.equal(addedBody.conversation?.members.some((member) => member.username === "dave"), true);
+
+    const removed = await fetch(`${base}/api/groups/${conversationId}/members/${dave.user.id}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${alice.token}` },
+    });
+    const removedBody = (await removed.json()) as { error?: string; conversation?: { members: Array<{ username: string }> } };
+    assert.equal(removed.status, 200, removedBody.error);
+    assert.equal(removedBody.conversation?.members.some((member) => member.username === "dave"), false);
+    const daveMessages = await fetch(`${base}/api/conversations/${conversationId}/messages`, {
+      headers: { Authorization: `Bearer ${dave.token}` },
+    });
+    assert.equal(daveMessages.status, 404);
+
+    const left = await fetch(`${base}/api/groups/${conversationId}/members`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${alice.token}` },
+    });
+    assert.equal(left.status, 200);
+    const after = await fetch(`${base}/api/conversations`, { headers: { Authorization: `Bearer ${bob.token}` } });
+    const afterBody = (await after.json()) as { conversations: Array<{ id: string; viewerRole: string }> };
+    assert.equal(afterBody.conversations.find((item) => item.id === conversationId)?.viewerRole, "admin");
   } finally {
     await started.close();
     await rm(directory, { recursive: true, force: true });

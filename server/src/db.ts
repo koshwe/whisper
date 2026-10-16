@@ -71,6 +71,8 @@ export type MessageReaction = {
   emoji: string;
 };
 
+export type MemberUser = PublicUser & { role: "admin" | "member" };
+
 export type ConversationSummary = {
   id: string;
   kind: "direct" | "group";
@@ -79,8 +81,9 @@ export type ConversationSummary = {
   lastMessageAt: string | null;
   unreadCount: number;
   peerLastReadAt: string | null;
+  viewerRole: "admin" | "member" | null;
   peer: PublicUser | null;
-  members: PublicUser[];
+  members: MemberUser[];
   lastMessage: StoredMessage | null;
 };
 
@@ -185,6 +188,7 @@ export function openDatabase(dbPath: string) {
       conversation_id TEXT NOT NULL,
       user_id TEXT NOT NULL,
       last_read_at TEXT,
+      role TEXT NOT NULL DEFAULT 'member',
       PRIMARY KEY (conversation_id, user_id),
       FOREIGN KEY (conversation_id) REFERENCES conversations(id),
       FOREIGN KEY (user_id) REFERENCES users(id)
@@ -260,6 +264,23 @@ export function openDatabase(dbPath: string) {
   if (!conversationColumns.some((column) => column.name === "title")) {
     db.exec("ALTER TABLE conversations ADD COLUMN title TEXT");
   }
+  const memberColumns = db.prepare("PRAGMA table_info(members)").all() as Array<{ name: string }>;
+  if (!memberColumns.some((column) => column.name === "role")) {
+    db.exec("ALTER TABLE members ADD COLUMN role TEXT NOT NULL DEFAULT 'member'");
+  }
+  const groupsMissingAdmin = db.prepare(`
+    SELECT id FROM conversations
+    WHERE kind = 'group'
+      AND NOT EXISTS (
+        SELECT 1 FROM members WHERE members.conversation_id = conversations.id AND members.role = 'admin'
+      )
+  `).all() as Array<{ id: string }>;
+  const earliestMember = db.prepare("SELECT user_id FROM members WHERE conversation_id = ? ORDER BY rowid ASC LIMIT 1");
+  const assignAdmin = db.prepare("UPDATE members SET role = 'admin' WHERE conversation_id = ? AND user_id = ?");
+  for (const group of groupsMissingAdmin) {
+    const first = earliestMember.get(group.id) as { user_id: string } | undefined;
+    if (first) assignAdmin.run(group.id, first.user_id);
+  }
 
   const insertUser = db.prepare(`
     INSERT INTO users (
@@ -290,7 +311,7 @@ export function openDatabase(dbPath: string) {
     "INSERT INTO conversations (id, direct_key, kind, title, created_at, last_message_at) VALUES (?, ?, ?, ?, ?, NULL)",
   );
   const insertMember = db.prepare(
-    "INSERT INTO members (conversation_id, user_id, last_read_at) VALUES (?, ?, NULL)",
+    "INSERT INTO members (conversation_id, user_id, last_read_at, role) VALUES (?, ?, NULL, ?)",
   );
   const deleteMember = db.prepare("DELETE FROM members WHERE conversation_id = ? AND user_id = ?");
   const memberExists = db.prepare("SELECT 1 AS ok FROM members WHERE conversation_id = ? AND user_id = ?");
@@ -302,11 +323,14 @@ export function openDatabase(dbPath: string) {
     ORDER BY COALESCE(last_message_at, created_at) DESC
   `);
   const otherMembers = db.prepare(`
-    SELECT users.* FROM users
+    SELECT users.*, members.role AS member_role FROM users
     JOIN members ON members.user_id = users.id
     WHERE members.conversation_id = ? AND users.id != ?
     ORDER BY users.username
   `);
+  const memberRole = db.prepare("SELECT role FROM members WHERE conversation_id = ? AND user_id = ?");
+  const setMemberRole = db.prepare("UPDATE members SET role = ? WHERE conversation_id = ? AND user_id = ?");
+  const earliestMemberId = db.prepare("SELECT user_id FROM members WHERE conversation_id = ? ORDER BY rowid ASC LIMIT 1");
   const memberIdRows = db.prepare("SELECT user_id AS id FROM members WHERE conversation_id = ?");
   const conversationKind = db.prepare("SELECT kind FROM conversations WHERE id = ?");
   const memberRead = db.prepare("SELECT last_read_at FROM members WHERE conversation_id = ? AND user_id = ?");
@@ -451,11 +475,17 @@ export function openDatabase(dbPath: string) {
     return row?.kind === "group" ? "group" : "direct";
   }
 
+  function toMember(user: UserRow & { member_role?: string | null }): MemberUser {
+    return { ...toPublic(user), role: user.member_role === "admin" ? "admin" : "member" };
+  }
+
   function hydrateConversation(conversation: ConversationRow, userId: string): ConversationSummary | null {
     const kind = conversation.kind === "group" ? "group" : "direct";
-    const others = (otherMembers.all(conversation.id, userId) as UserRow[]).map(toPublic);
+    const others = (otherMembers.all(conversation.id, userId) as Array<UserRow & { member_role: string | null }>).map(toMember);
     if (kind === "direct" && others.length !== 1) return null;
     const peer = kind === "direct" ? others[0] : null;
+    const roleRow = memberRole.get(conversation.id, userId) as { role: string } | undefined;
+    const viewerRole = kind === "group" ? (roleRow?.role === "admin" ? "admin" : "member") : null;
     const mine = memberRead.get(conversation.id, userId) as { last_read_at: string | null } | undefined;
     const readAt = mine?.last_read_at ?? null;
     const unread = kind === "group"
@@ -477,6 +507,7 @@ export function openDatabase(dbPath: string) {
       lastMessageAt: conversation.last_message_at,
       unreadCount: Number(unread.count),
       peerLastReadAt,
+      viewerRole,
       peer,
       members: others,
       lastMessage: latest ? presentRow(latest, userId, kind) : null,
@@ -571,8 +602,8 @@ export function openDatabase(dbPath: string) {
       try {
         withTransaction(() => {
           insertConversation.run(id, key, "direct", null, now);
-          insertMember.run(id, userA);
-          insertMember.run(id, userB);
+          insertMember.run(id, userA, "member");
+          insertMember.run(id, userB, "member");
         });
       } catch (error) {
         const raced = conversationByKey.get(key) as { id: string } | undefined;
@@ -583,6 +614,10 @@ export function openDatabase(dbPath: string) {
     },
     isMember(conversationId: string, userId: string) {
       return Boolean(memberExists.get(conversationId, userId));
+    },
+    isAdmin(conversationId: string, userId: string) {
+      const row = memberRole.get(conversationId, userId) as { role: string } | undefined;
+      return row?.role === "admin";
     },
     listConversations(userId: string) {
       const rows = listConversationRows.all(userId) as ConversationRow[];
@@ -606,8 +641,8 @@ export function openDatabase(dbPath: string) {
       const now = new Date().toISOString();
       withTransaction(() => {
         insertConversation.run(id, `group:${id}`, "group", input.title, now);
-        insertMember.run(id, input.ownerId);
-        for (const memberId of input.memberIds) insertMember.run(id, memberId);
+        insertMember.run(id, input.ownerId, "admin");
+        for (const memberId of input.memberIds) insertMember.run(id, memberId, "member");
       });
       return id;
     },
@@ -615,12 +650,18 @@ export function openDatabase(dbPath: string) {
       if (memberExists.get(conversationId, userId)) return false;
       const count = memberCount.get(conversationId) as { count: number };
       if (Number(count.count) >= 16) return false;
-      insertMember.run(conversationId, userId);
+      insertMember.run(conversationId, userId, "member");
       return true;
     },
     removeMember(conversationId: string, userId: string) {
+      const role = memberRole.get(conversationId, userId) as { role: string } | undefined;
       const removed = deleteMember.run(conversationId, userId);
-      return removed.changes === 1;
+      if (removed.changes !== 1) return false;
+      if (role?.role === "admin" && kindOf(conversationId) === "group") {
+        const next = earliestMemberId.get(conversationId) as { user_id: string } | undefined;
+        if (next) setMemberRole.run("admin", conversationId, next.user_id);
+      }
+      return true;
     },
     insertMessage(input: {
       conversationId: string;

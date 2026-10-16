@@ -37,6 +37,8 @@ export type MessageReaction = {
   emoji: string;
 };
 
+export type MemberUser = PublicUser & { role: "admin" | "member" };
+
 export type Conversation = {
   id: string;
   kind: "direct" | "group";
@@ -46,8 +48,9 @@ export type Conversation = {
   unreadCount: number;
   peerLastReadAt: string | null;
   peerOnline?: boolean;
+  viewerRole: "admin" | "member" | null;
   peer: PublicUser | null;
-  members: PublicUser[];
+  members: MemberUser[];
   lastMessage: ServerMessage | null;
 };
 
@@ -189,6 +192,10 @@ export function setCollectsReplies(conversationId: string, messageId: string, co
 
 export function leaveGroup(conversationId: string) {
   return request<{ ok: boolean }>(`/api/groups/${conversationId}/members`, { method: "DELETE" });
+}
+
+export function removeGroupMember(conversationId: string, userId: string) {
+  return request<{ conversation: Conversation }>(`/api/groups/${conversationId}/members/${userId}`, { method: "DELETE" });
 }
 
 export function addGroupMember(conversationId: string, username: string) {
