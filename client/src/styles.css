@@ -144,6 +144,9 @@ button { cursor: pointer; }
 .messages::before { content: ""; margin-top: auto; }
 .cipher-note, .day, .empty-thread { text-align: center; color: var(--muted); font-size: 13px; }
 .cipher-note, .day { width: fit-content; margin: 8px auto 16px; background: rgba(16, 33, 28, 0.9); border-radius: 999px; padding: 6px 12px; }
+button.day { display: flex; align-items: center; gap: 8px; border: 0; color: var(--text); }
+.day-plus { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; background: var(--accent); color: var(--accent-ink); font-weight: 700; line-height: 1; flex: none; }
+.day-count { color: var(--muted); }
 .message-row { display: flex; align-items: center; gap: 4px; max-width: min(78%, 600px); margin: 4px 0; }
 .message-row.in { align-self: flex-start; }
 .message-row.out { align-self: flex-end; flex-direction: row-reverse; }

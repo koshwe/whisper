@@ -213,6 +213,11 @@ function sameDay(left: string, right: string) {
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 }
 
+function dayKey(iso: string) {
+  const date = new Date(iso);
+  return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+}
+
 function formatTime(iso: string) {
   return new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
@@ -466,6 +471,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Record<string, ChatMessage[]>>({});
   const [pins, setPins] = useState<Record<string, ChatPin[]>>({});
+  const [openDays, setOpenDays] = useState<Record<string, boolean>>({});
   const [hasMore, setHasMore] = useState<Record<string, boolean>>({});
   const [previews, setPreviews] = useState<Record<string, string>>({});
   const [draft, setDraft] = useState("");
@@ -1645,8 +1651,15 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     if (target) {
       const parent = collectorNonce(target, byNonce);
       if (parent) setOpenFolders((current) => ({ ...current, [parent]: true }));
+      revealDay(active.id, target.createdAt);
     }
     requestAnimationFrame(() => requestAnimationFrame(() => focusQuoted(nonce)));
+  }
+
+  function revealDay(conversationId: string, createdAt: string) {
+    if (sameDay(createdAt, new Date().toISOString())) return;
+    const id = `${conversationId}:${dayKey(createdAt)}`;
+    setOpenDays((current) => (current[id] ? current : { ...current, [id]: true }));
   }
 
   function pinMatches(pin: ChatPin, message: { id: string; nonce: string }) {
@@ -2204,6 +2217,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     if (message) {
       const collector = collectorNonce(message, byNonce);
       if (collector) setOpenFolders((current) => ({ ...current, [collector]: true }));
+      revealDay(conversation.id, message.createdAt);
     }
     window.setTimeout(() => focusQuoted(hit.nonce), 80);
   }
@@ -2497,7 +2511,19 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                           })()}
                           {message.forwarded && <p className="forwarded-label">Forwarded</p>}
                           {message.reply && !nested && (
-                            <button type="button" className="quote" onClick={() => focusQuoted(message.reply!.id)}>
+                            <button
+                              type="button"
+                              className="quote"
+                              onClick={() => {
+                                const quoted = byNonce.get(message.reply!.id);
+                                if (quoted) {
+                                  revealDay(active.id, quoted.createdAt);
+                                  const parent = collectorNonce(quoted, byNonce);
+                                  if (parent) setOpenFolders((current) => ({ ...current, [parent]: true }));
+                                }
+                                requestAnimationFrame(() => requestAnimationFrame(() => focusQuoted(message.reply!.id)));
+                              }}
+                            >
                               <strong>{quoteLabel(message.reply, user.id)}</strong>
                               <span>{shownQuote(message.reply, byNonce)}</span>
                             </button>
@@ -2668,12 +2694,38 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                     </div>
                   );
                 };
-                return visible.map((message, index) => {
-                  const previous = visible[index - 1];
+                const todayKey = dayKey(new Date().toISOString());
+                const groups: Array<{ key: string; label: string; messages: ChatMessage[] }> = [];
+                for (const message of visible) {
+                  const key = dayKey(message.createdAt);
+                  const last = groups[groups.length - 1];
+                  if (!last || last.key !== key) groups.push({ key, label: dayLabel(message.createdAt), messages: [message] });
+                  else last.messages.push(message);
+                }
+                const lastNonce = visible[visible.length - 1]?.nonce;
+                return groups.map((group) => {
+                  const today = group.key === todayKey;
+                  const open = today || Boolean(openDays[`${active.id}:${group.key}`]);
                   return (
-                    <Fragment key={message.nonce}>
-                      {(!previous || !sameDay(previous.createdAt, message.createdAt)) && <p className="day">{dayLabel(message.createdAt)}</p>}
-                      {renderBubble(message, false, index === visible.length - 1)}
+                    <Fragment key={group.key}>
+                      {today ? (
+                        <p className="day">Today</p>
+                      ) : (
+                        <button
+                          type="button"
+                          className="day day-toggle"
+                          aria-expanded={open}
+                          onClick={() => {
+                            const id = `${active.id}:${group.key}`;
+                            setOpenDays((current) => ({ ...current, [id]: !current[id] }));
+                          }}
+                        >
+                          <span className="day-plus" aria-hidden="true">{open ? "−" : "+"}</span>
+                          {group.label}
+                          <span className="day-count">{group.messages.length === 1 ? "1 message" : `${group.messages.length} messages`}</span>
+                        </button>
+                      )}
+                      {open && group.messages.map((message) => renderBubble(message, false, message.nonce === lastNonce))}
                     </Fragment>
                   );
                 });
