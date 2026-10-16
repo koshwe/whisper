@@ -1649,17 +1649,38 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     requestAnimationFrame(() => requestAnimationFrame(() => focusQuoted(nonce)));
   }
 
-  async function togglePin(message: ChatMessage) {
-    if (!active || message.pending || message.id.startsWith("local:") || message.failed) return;
+  function pinMatches(pin: ChatPin, message: { id: string; nonce: string }) {
+    return pin.messageId === message.id || pin.message.nonce === message.nonce;
+  }
+
+  async function unpinMessage(messageId: string) {
+    if (!active || !messageId || messageId.startsWith("local:")) return;
     setActionMenu(null);
+    try {
+      const saved = await setMessagePin(active.id, messageId, false);
+      await showPins(active, saved.pins);
+      setSendError("");
+    } catch (error) {
+      setSendError(error instanceof Error ? error.message : "Couldn't unpin that message.");
+    }
+  }
+
+  async function togglePin(message: ChatMessage) {
+    if (!active || message.pending || message.id.startsWith("local:")) return;
     const currentPins = pins[active.id] ?? [];
-    const pinned = currentPins.some((pin) => pin.messageId === message.id);
-    if (!pinned && currentPins.length >= 5) {
+    const pinned = currentPins.some((pin) => pinMatches(pin, message));
+    if (pinned) {
+      await unpinMessage(message.id);
+      return;
+    }
+    if (message.failed) return;
+    setActionMenu(null);
+    if (currentPins.length >= 5) {
       setSendError("This chat already has 5 pinned messages. Unpin one first.");
       return;
     }
     try {
-      const saved = await setMessagePin(active.id, message.id, !pinned);
+      const saved = await setMessagePin(active.id, message.id, true);
       await showPins(active, saved.pins);
       setSendError("");
     } catch (error) {
@@ -2381,13 +2402,18 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                   const live = activeMessages.find((message) => message.id === pin.messageId || message.nonce === pin.message.nonce);
                   const shown = live ?? pin.message;
                   return (
-                    <button type="button" className="pin-note" key={pin.messageId} onClick={() => void focusPin({ ...pin, message: shown })}>
-                      <span className="pin-index">{index + 1}</span>
-                      <span className="pin-copy">
-                        <strong>Pinned by {personName(active, pin.pinnedBy, user.id)}</strong>
-                        <em>{previewText(shown) || "Message"}</em>
-                      </span>
-                    </button>
+                    <div className="pin-note" key={pin.messageId}>
+                      <button type="button" className="pin-jump" onClick={() => void focusPin({ ...pin, message: shown })}>
+                        <span className="pin-index">{index + 1}</span>
+                        <span className="pin-copy">
+                          <strong>Pinned by {personName(active, pin.pinnedBy, user.id)}</strong>
+                          <em>{previewText(shown) || "Message"}</em>
+                        </span>
+                      </button>
+                      <button type="button" className="pin-unpin" onClick={() => void unpinMessage(pin.messageId)}>
+                        Unpin
+                      </button>
+                    </div>
                   );
                 })}
               </div>
@@ -2466,7 +2492,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                       ) : (
                         <>
                           {(() => {
-                            const pinIndex = (pins[active.id] ?? []).findIndex((pin) => pin.messageId === message.id);
+                            const pinIndex = (pins[active.id] ?? []).findIndex((pin) => pinMatches(pin, message));
                             return pinIndex >= 0 ? <p className="forwarded-label">Pinned · {pinIndex + 1}</p> : null;
                           })()}
                           {message.forwarded && <p className="forwarded-label">Forwarded</p>}
@@ -2508,12 +2534,13 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                                   <button type="button" role="menuitem" onClick={() => { setActionMenu(null); beginForward([message]); }}>Forward</button>
                                   <button type="button" role="menuitem" onClick={() => beginSelect(message)}>Select</button>
                                   <button type="button" role="menuitem" onClick={() => void shareMessages([message])}>Share</button>
-                                  {saved && !message.failed && (
-                                    <button type="button" role="menuitem" onClick={() => void togglePin(message)}>
-                                      {(pins[active.id] ?? []).some((pin) => pin.messageId === message.id) ? "Unpin" : "Pin"}
-                                    </button>
+                                  {saved && !message.failed && !(pins[active.id] ?? []).some((pin) => pinMatches(pin, message)) && (
+                                    <button type="button" role="menuitem" onClick={() => void togglePin(message)}>Pin</button>
                                   )}
                                 </>
+                              )}
+                              {saved && (pins[active.id] ?? []).some((pin) => pinMatches(pin, message)) && (
+                                <button type="button" role="menuitem" onClick={() => void unpinMessage(message.id)}>Unpin</button>
                               )}
                               {canEdit && (
                                 <button type="button" role="menuitem" onClick={() => { setActionMenu(null); beginEdit(message); }}>Edit</button>
