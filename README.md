@@ -47,6 +47,7 @@ Each account has an encryption key pair and a signing key pair, generated in the
 - A group chat encrypts each message separately for every current member, up to 16 people. The person who starts the group is its admin and can add or remove people later. The server stores those copies and cannot read them. Someone who joins later does not receive older messages. The group name is visible to the server, the same way usernames are.
 - The sender signs the ciphertext. The recipient checks that signature before showing the text.
 - The conversation header shows a safety number. Compare it with the other person on a call or in person.
+- Message notifications are created on this device after the message is decrypted. Turn them on from the profile menu. They appear when that chat is not the open window. The server does not receive the notice text.
 
 The server checks signatures so it can reject forged ciphertext. It does not have the private keys, so it cannot read the message text.
 

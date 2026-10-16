@@ -271,6 +271,42 @@ function previewText(message: { text: string; file: AttachmentMeta | null; faile
   return message.forwarded ? `Forwarded: ${body}` : body;
 }
 
+const NOTIFY_KEY = "whisper.notify";
+
+function readNotifyChoice() {
+  try {
+    return localStorage.getItem(NOTIFY_KEY) === "on";
+  } catch {
+    return false;
+  }
+}
+
+function writeNotifyChoice(on: boolean) {
+  try {
+    localStorage.setItem(NOTIFY_KEY, on ? "on" : "off");
+  } catch {
+    // The choice stays for this visit if storage is blocked.
+  }
+}
+
+function notificationsReady() {
+  return readNotifyChoice() && typeof Notification !== "undefined" && Notification.permission === "granted";
+}
+
+function postNotification(title: string, body: string, tag: string, onOpen: () => void) {
+  if (!notificationsReady()) return;
+  try {
+    const notification = new Notification(title, { body, tag });
+    notification.onclick = () => {
+      window.focus();
+      onOpen();
+      notification.close();
+    };
+  } catch {
+    // This browser only shows notifications from a background worker.
+  }
+}
+
 function pastedImage(data: DataTransfer | null) {
   if (!data) return null;
   for (const item of data.items) {
@@ -537,11 +573,14 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
   const [passwordNext, setPasswordNext] = useState("");
   const [passwordConfirm, setPasswordConfirm] = useState("");
   const [passwordError, setPasswordError] = useState("");
+  const [notifyOn, setNotifyOn] = useState(readNotifyChoice);
+  const [notifyError, setNotifyError] = useState("");
   const [passwordBusy, setPasswordBusy] = useState(false);
 
   const conversationsRef = useRef(conversations);
   const messagesRef = useRef(messages);
   const activeIdRef = useRef(activeId);
+  const openChatRef = useRef<(conversationId: string) => void>(() => undefined);
   const identityRef = useRef(identity);
   const socketRef = useRef<WebSocket | null>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -955,6 +994,12 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     });
     next.sort((a, b) => (b.lastMessageAt ?? b.createdAt).localeCompare(a.lastMessageAt ?? a.createdAt));
     replaceConversations(next);
+    if (!mine && !already && !viewing) {
+      const sender = personName(conversation, revealed.senderId, user.id);
+      const title = conversation.kind === "group" ? `${sender} in ${chatTitle(conversation)}` : chatTitle(conversation);
+      const body = revealed.failed ? "New message" : previewText(revealed).slice(0, 180) || "New message";
+      postNotification(title, body, event.message.conversationId, () => openChatRef.current(event.message.conversationId));
+    }
     if (!mine && viewing) void markRead(event.message.conversationId, event.message.id).catch(() => undefined);
   }
 
@@ -1036,6 +1081,34 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
       .catch((error: unknown) => {
         setSendError(error instanceof Error ? error.message : "Couldn't load messages.");
       });
+  }
+
+  openChatRef.current = (conversationId: string) => {
+    const conversation = conversationsRef.current.find((item) => item.id === conversationId);
+    if (conversation) selectConversation(conversation);
+  };
+
+  async function toggleNotifications() {
+    if (notifyOn && typeof Notification !== "undefined" && Notification.permission === "granted") {
+      writeNotifyChoice(false);
+      setNotifyOn(false);
+      setNotifyError("");
+      return;
+    }
+    if (typeof Notification === "undefined") {
+      setNotifyError("This browser can't show notifications.");
+      return;
+    }
+    const permission = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
+    if (permission !== "granted") {
+      writeNotifyChoice(false);
+      setNotifyOn(false);
+      setNotifyError("Notifications stay off until the browser allows them.");
+      return;
+    }
+    writeNotifyChoice(true);
+    setNotifyOn(true);
+    setNotifyError("");
   }
 
   async function loadEarlier() {
@@ -3084,6 +3157,13 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
               <div>
                 <h2>{user.displayName}</h2>
                 <p className="hint">@{user.username} · {user.provider === "google" ? "Gmail sign-in" : "Password sign-in"}</p>
+                <button type="button" className="text" onClick={() => void toggleNotifications()}>
+                  {notifyOn && typeof Notification !== "undefined" && Notification.permission === "granted"
+                    ? "Turn off message notifications"
+                    : "Turn on message notifications"}
+                </button>
+                <p className="hint">A notice appears on this device when a new message arrives and that chat is not open. The text is decrypted here first.</p>
+                {notifyError && <p className="error">{notifyError}</p>}
                 <button type="button" className="text" onClick={() => setShowFingerprint((current) => !current)}>
                   {showFingerprint ? "Hide key fingerprint" : "Show key fingerprint"}
                 </button>
