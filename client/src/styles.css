@@ -268,8 +268,9 @@ button.day { display: flex; align-items: center; gap: 8px; border: 0; color: var
 .pending-file img, .attachment img { width: 72px; height: 72px; object-fit: cover; border-radius: 10px; }
 .attachment.image img { width: min(100%, 280px); height: auto; max-height: 280px; object-fit: contain; }
 .photo-zoom { display: block; border: 0; padding: 0; background: transparent; cursor: pointer; line-height: 0; }
-.attachment.image.magnified img { width: min(100%, 560px); max-height: 560px; }
-.message-row:has(.attachment.image.magnified) { max-width: min(96%, 640px); }
+.photo-viewer { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 64px 16px 16px; background: rgba(0, 0, 0, 0.92); }
+.photo-viewer img { width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 0; }
+.photo-viewer-close { position: absolute; top: 16px; right: 16px; border: 0; border-radius: 999px; background: rgba(255, 255, 255, 0.16); color: #fff; font-weight: 700; padding: 8px 14px; }
 .pending-file span, .file-card span { display: grid; min-width: 0; }
 .pending-file small, .file-card small { color: var(--muted); }
 .file-card { background: rgba(0, 0, 0, 0.18); border-radius: 10px; padding: 8px; margin-top: 6px; }

@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent } from "react";
+import { createPortal } from "react-dom";
 import {
   decryptFile,
   decryptGroupMessage,
@@ -3413,7 +3414,7 @@ function FileAttachment({ conversationId, file, localUrl }: { conversationId: st
   const [url, setUrl] = useState<string | null>(localUrl ?? null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [magnified, setMagnified] = useState(false);
+  const [viewer, setViewer] = useState(false);
   const owned = useRef<string | null>(null);
   const image = isPreviewableImage(file.type);
 
@@ -3437,6 +3438,15 @@ function FileAttachment({ conversationId, file, localUrl }: { conversationId: st
       if (owned.current) URL.revokeObjectURL(owned.current);
     };
   }, [conversationId, file, image, localUrl]);
+
+  useEffect(() => {
+    if (!viewer) return;
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setViewer(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [viewer]);
 
   async function download() {
     setBusy(true);
@@ -3464,20 +3474,33 @@ function FileAttachment({ conversationId, file, localUrl }: { conversationId: st
   }
 
   return (
-    <div className={image ? `attachment image${magnified ? " magnified" : ""}` : "attachment"}>
+    <div className={image ? "attachment image" : "attachment"}>
       {image && url && (
         <button
           type="button"
           className="photo-zoom"
-          aria-pressed={magnified}
-          aria-label={magnified ? "Show photo at normal size" : "Magnify photo"}
+          aria-label="View photo"
           onClick={(event) => {
             event.stopPropagation();
-            setMagnified((current) => !current);
+            setViewer(true);
           }}
         >
           <img src={url} alt="Photo" />
         </button>
+      )}
+      {viewer && url && createPortal(
+        <div className="photo-viewer" role="dialog" aria-modal="true" aria-label="Photo" onMouseDown={() => setViewer(false)}>
+          <button
+            type="button"
+            className="photo-viewer-close"
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={() => setViewer(false)}
+          >
+            Close
+          </button>
+          <img src={url} alt="Photo" onMouseDown={(event) => event.stopPropagation()} />
+        </div>,
+        document.body,
       )}
       <div className="file-card">
         <span>
