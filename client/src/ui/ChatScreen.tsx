@@ -308,6 +308,33 @@ function postNotification(title: string, body: string, tag: string, onOpen: () =
   }
 }
 
+function playMessageSound() {
+  const AudioCtx = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioCtx) return;
+  try {
+    const context = new AudioCtx();
+    const now = context.currentTime;
+    const gain = context.createGain();
+    gain.connect(context.destination);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.07, now + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.34);
+    const tone = (frequency: number, start: number, stop: number) => {
+      const oscillator = context.createOscillator();
+      oscillator.type = "sine";
+      oscillator.frequency.value = frequency;
+      oscillator.connect(gain);
+      oscillator.start(start);
+      oscillator.stop(stop);
+    };
+    tone(880, now, now + 0.12);
+    tone(1175, now + 0.1, now + 0.32);
+    window.setTimeout(() => void context.close(), 500);
+  } catch {
+    // The browser blocks sound until the page has been used.
+  }
+}
+
 function pastedImage(data: DataTransfer | null) {
   if (!data) return null;
   for (const item of data.items) {
@@ -582,6 +609,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
   const messagesRef = useRef(messages);
   const activeIdRef = useRef(activeId);
   const openChatRef = useRef<(conversationId: string) => void>(() => undefined);
+  const heardRef = useRef(new Set<string>());
   const identityRef = useRef(identity);
   const socketRef = useRef<WebSocket | null>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -995,14 +1023,68 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     });
     next.sort((a, b) => (b.lastMessageAt ?? b.createdAt).localeCompare(a.lastMessageAt ?? a.createdAt));
     replaceConversations(next);
-    if (!mine && !already && !viewing) {
-      const sender = personName(conversation, revealed.senderId, user.id);
-      const title = conversation.kind === "group" ? `${sender} in ${chatTitle(conversation)}` : chatTitle(conversation);
-      const body = revealed.failed ? "New message" : previewText(revealed).slice(0, 180) || "New message";
-      postNotification(title, body, event.message.conversationId, () => openChatRef.current(event.message.conversationId));
-    }
+    if (!mine && !already && !viewing) announceIncoming(event.message.id, conversation, revealed);
     if (!mine && viewing) void markRead(event.message.conversationId, event.message.id).catch(() => undefined);
   }
+
+  function announceIncoming(messageId: string, conversation: Conversation, revealed: ChatMessage) {
+    if (heardRef.current.has(messageId)) return;
+    heardRef.current.add(messageId);
+    if (heardRef.current.size > 80) {
+      const oldest = heardRef.current.values().next().value;
+      if (oldest) heardRef.current.delete(oldest);
+    }
+    playMessageSound();
+    const sender = personName(conversation, revealed.senderId, user.id);
+    const title = conversation.kind === "group" ? `${sender} in ${chatTitle(conversation)}` : chatTitle(conversation);
+    const body = revealed.failed ? "New message" : previewText(revealed).slice(0, 180) || "New message";
+    postNotification(title, body, conversation.id, () => openChatRef.current(conversation.id));
+  }
+
+  async function refreshLatest() {
+    try {
+      const { conversations: list } = await listConversations();
+      const prior = new Map(conversationsRef.current.map((item) => [item.id, item]));
+      for (const conversation of list) {
+        const last = conversation.lastMessage;
+        const previous = prior.get(conversation.id)?.lastMessage;
+        if (!last || (previous && (previous.id === last.id || previous.nonce === last.nonce))) continue;
+        const revealed = await revealMessage(last, conversation, identityRef.current, user.id);
+        setPreviews((current) => ({ ...current, [conversation.id]: previewText(revealed) }));
+        const viewing = activeIdRef.current === conversation.id && document.hasFocus();
+        if (loadedRef.current.has(conversation.id)) {
+          const page = await listMessages(conversation.id);
+          const incoming = await Promise.all(page.messages.map((message) => revealMessage(message, conversation, identityRef.current, user.id)));
+          const existing = messagesRef.current[conversation.id] ?? [];
+          const newcomers = incoming.filter((message) => message.senderId !== user.id && !existing.some((item) => item.nonce === message.nonce || item.id === message.id));
+          setHasMore((current) => ({ ...current, [conversation.id]: page.hasMore }));
+          setMessages((current) => {
+            let merged = current[conversation.id] ?? [];
+            for (const message of incoming) merged = mergeMessage(merged, message);
+            return { ...current, [conversation.id]: merged };
+          });
+          await showPins(conversation, page.pins ?? []);
+          if (viewing) noteRead(conversation.id, incoming);
+          else if (newcomers.length > 0) announceIncoming(newcomers[newcomers.length - 1].id, conversation, newcomers[newcomers.length - 1]);
+        } else if (!viewing && last.senderId !== user.id) {
+          announceIncoming(last.id, conversation, revealed);
+        }
+      }
+      const focused = document.hasFocus() ? activeIdRef.current : null;
+      const next = list.map((conversation) => (focused === conversation.id ? { ...conversation, unreadCount: 0 } : conversation));
+      next.sort((a, b) => (b.lastMessageAt ?? b.createdAt).localeCompare(a.lastMessageAt ?? a.createdAt));
+      replaceConversations(next);
+    } catch {
+      // The next minute tries again.
+    }
+  }
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void refreshLatest();
+    }, 60_000);
+    return () => window.clearInterval(timer);
+  }, [user.id]);
 
   async function ensureMessages(conversation: Conversation) {
     if (loadedRef.current.has(conversation.id)) return messagesRef.current[conversation.id] ?? [];
@@ -3163,7 +3245,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                     ? "Turn off message notifications"
                     : "Turn on message notifications"}
                 </button>
-                <p className="hint">A notice appears on this device when a new message arrives and that chat is not open. The text is decrypted here first.</p>
+                <p className="hint">A sound plays when a new message arrives and that chat is not open. A notice appears too after notifications are on. Chats refresh every minute.</p>
                 {notifyError && <p className="error">{notifyError}</p>}
                 <button type="button" className="text" onClick={() => setShowFingerprint((current) => !current)}>
                   {showFingerprint ? "Hide key fingerprint" : "Show key fingerprint"}
@@ -3415,6 +3497,7 @@ function FileAttachment({ conversationId, file, localUrl }: { conversationId: st
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [viewer, setViewer] = useState(false);
+  const [orientation, setOrientation] = useState<"portrait" | "landscape">("landscape");
   const owned = useRef<string | null>(null);
   const image = isPreviewableImage(file.type);
 
@@ -3498,7 +3581,16 @@ function FileAttachment({ conversationId, file, localUrl }: { conversationId: st
           >
             Close
           </button>
-          <img src={url} alt="Photo" onMouseDown={(event) => event.stopPropagation()} />
+          <img
+            src={url}
+            alt="Photo"
+            className={orientation}
+            onLoad={(event) => {
+              const photo = event.currentTarget;
+              setOrientation(photo.naturalHeight > photo.naturalWidth ? "portrait" : "landscape");
+            }}
+            onMouseDown={(event) => event.stopPropagation()}
+          />
         </div>,
         document.body,
       )}
