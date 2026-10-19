@@ -3572,15 +3572,12 @@ function FileAttachment({ conversationId, file, localUrl }: { conversationId: st
       )}
       {viewer && url && createPortal(
         <div className="photo-viewer" role="dialog" aria-modal="true" aria-label="Photo" onMouseDown={() => setViewer(false)}>
-          <button
-            type="button"
-            className="photo-viewer-close"
-            onMouseDown={(event) => event.stopPropagation()}
-            onClick={() => setViewer(false)}
-          >
-            Close
-          </button>
-          <img src={url} alt="Photo" onMouseDown={(event) => event.stopPropagation()} />
+          <div className="photo-viewer-frame" onMouseDown={(event) => event.stopPropagation()}>
+            <button type="button" className="photo-viewer-close" onClick={() => setViewer(false)}>
+              Close
+            </button>
+            <img src={url} alt="Photo" />
+          </div>
         </div>,
         document.body,
       )}
