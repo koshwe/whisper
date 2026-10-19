@@ -3497,7 +3497,6 @@ function FileAttachment({ conversationId, file, localUrl }: { conversationId: st
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [viewer, setViewer] = useState(false);
-  const [orientation, setOrientation] = useState<"portrait" | "landscape">("landscape");
   const owned = useRef<string | null>(null);
   const image = isPreviewableImage(file.type);
 
@@ -3581,16 +3580,7 @@ function FileAttachment({ conversationId, file, localUrl }: { conversationId: st
           >
             Close
           </button>
-          <img
-            src={url}
-            alt="Photo"
-            className={orientation}
-            onLoad={(event) => {
-              const photo = event.currentTarget;
-              setOrientation(photo.naturalHeight > photo.naturalWidth ? "portrait" : "landscape");
-            }}
-            onMouseDown={(event) => event.stopPropagation()}
-          />
+          <img src={url} alt="Photo" onMouseDown={(event) => event.stopPropagation()} />
         </div>,
         document.body,
       )}
