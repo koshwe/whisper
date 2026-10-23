@@ -370,6 +370,13 @@ function isPreviewableImage(type: string) {
   return type === "image/jpeg" || type === "image/png" || type === "image/gif" || type === "image/webp";
 }
 
+type PhotoSlide = {
+  nonce: string;
+  conversationId: string;
+  file: AttachmentMeta;
+  localUrl?: string;
+};
+
 type ImageKind = "jpeg" | "png" | "gif" | "webp" | "heic";
 
 function kindFromType(type: string): ImageKind | null {
@@ -571,6 +578,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
   const [emojiDraft, setEmojiDraft] = useState("");
   const [copiedNonce, setCopiedNonce] = useState<string | null>(null);
   const [dialog, setDialog] = useState<null | "new" | "safety" | "profile" | "reset" | "password" | "forward" | "delete" | "group" | "people">(null);
+  const [photoGallery, setPhotoGallery] = useState<{ slides: PhotoSlide[]; index: number } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ChatMessage | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
@@ -2445,6 +2453,17 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
   const userLookup = userQuery.trim();
   const wordLookup = wordQuery.trim();
 
+  function openPhoto(message: ChatMessage) {
+    if (!message.file || !isPreviewableImage(message.file.type)) return;
+    const slides = activeMessages.flatMap((item) =>
+      item.file && isPreviewableImage(item.file.type) && !item.failed
+        ? [{ nonce: item.nonce, conversationId: item.conversationId, file: item.file, localUrl: item.localUrl }]
+        : [],
+    );
+    const index = slides.findIndex((slide) => slide.nonce === message.nonce);
+    if (index >= 0) setPhotoGallery({ slides, index });
+  }
+
   return (
     <main className={mobileThread ? "app-shell thread-open" : "app-shell"}>
       <aside className="sidebar">
@@ -2685,7 +2704,12 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                             </button>
                           )}
                           {message.file && (
-                            <AttachmentCard conversationId={message.conversationId} file={message.file} localUrl={message.localUrl} />
+                            <AttachmentCard
+                              conversationId={message.conversationId}
+                              file={message.file}
+                              localUrl={message.localUrl}
+                              onOpen={isPreviewableImage(message.file.type) ? () => openPhoto(message) : undefined}
+                            />
                           )}
                           {message.text && <p>{message.text}</p>}
                         </>
@@ -3335,6 +3359,14 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
           }}
         />
       )}
+      {photoGallery && (
+        <PhotoViewer
+          slides={photoGallery.slides}
+          index={photoGallery.index}
+          onIndex={(index) => setPhotoGallery((current) => (current ? { ...current, index } : current))}
+          onClose={() => setPhotoGallery(null)}
+        />
+      )}
     </main>
   );
 }
@@ -3487,16 +3519,117 @@ function Paperclip() {
   );
 }
 
-function AttachmentCard({ conversationId, file, localUrl }: { conversationId: string; file: AttachmentMeta; localUrl?: string }) {
-  if (file.voice) return <VoiceNote conversationId={conversationId} file={file} localUrl={localUrl} />;
-  return <FileAttachment conversationId={conversationId} file={file} localUrl={localUrl} />;
+function PhotoViewer({
+  slides,
+  index,
+  onIndex,
+  onClose,
+}: {
+  slides: PhotoSlide[];
+  index: number;
+  onIndex: (index: number) => void;
+  onClose: () => void;
+}) {
+  const slide = slides[index];
+  const [url, setUrl] = useState<string | null>(slide?.localUrl ?? null);
+  const [failed, setFailed] = useState(false);
+  const owned = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!slide) return;
+    if (slide.localUrl) {
+      setUrl(slide.localUrl);
+      setFailed(false);
+      return;
+    }
+    let cancelled = false;
+    setUrl(null);
+    setFailed(false);
+    decryptAttachment(slide.conversationId, slide.file)
+      .then((bytes) => {
+        if (cancelled) return;
+        const copy = new Uint8Array(bytes.byteLength);
+        copy.set(bytes);
+        const next = URL.createObjectURL(new Blob([copy.buffer], { type: slide.file.type }));
+        owned.current = next;
+        setUrl(next);
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      });
+    return () => {
+      cancelled = true;
+      if (owned.current) {
+        URL.revokeObjectURL(owned.current);
+        owned.current = null;
+      }
+    };
+  }, [slide]);
+
+  useEffect(() => {
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (event.key === "ArrowLeft" && index > 0) {
+        event.preventDefault();
+        onIndex(index - 1);
+        return;
+      }
+      if (event.key === "ArrowRight" && index < slides.length - 1) {
+        event.preventDefault();
+        onIndex(index + 1);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [index, onClose, onIndex, slides.length]);
+
+  if (!slide) return null;
+  return createPortal(
+    <div className="photo-viewer" role="dialog" aria-modal="true" aria-label="Photo" onMouseDown={onClose}>
+      <div className="photo-viewer-frame" onMouseDown={(event) => event.stopPropagation()}>
+        <button type="button" className="photo-viewer-close" onClick={onClose}>
+          Close
+        </button>
+        {url ? <img src={url} alt="Photo" /> : <p className="photo-viewer-status">{failed ? "Couldn't open this photo." : "Opening photo…"}</p>}
+      </div>
+    </div>,
+    document.body,
+  );
 }
 
-function FileAttachment({ conversationId, file, localUrl }: { conversationId: string; file: AttachmentMeta; localUrl?: string }) {
+function AttachmentCard({
+  conversationId,
+  file,
+  localUrl,
+  onOpen,
+}: {
+  conversationId: string;
+  file: AttachmentMeta;
+  localUrl?: string;
+  onOpen?: () => void;
+}) {
+  if (file.voice) return <VoiceNote conversationId={conversationId} file={file} localUrl={localUrl} />;
+  return <FileAttachment conversationId={conversationId} file={file} localUrl={localUrl} onOpen={onOpen} />;
+}
+
+function FileAttachment({
+  conversationId,
+  file,
+  localUrl,
+  onOpen,
+}: {
+  conversationId: string;
+  file: AttachmentMeta;
+  localUrl?: string;
+  onOpen?: () => void;
+}) {
   const [url, setUrl] = useState<string | null>(localUrl ?? null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [viewer, setViewer] = useState(false);
   const owned = useRef<string | null>(null);
   const image = isPreviewableImage(file.type);
 
@@ -3520,15 +3653,6 @@ function FileAttachment({ conversationId, file, localUrl }: { conversationId: st
       if (owned.current) URL.revokeObjectURL(owned.current);
     };
   }, [conversationId, file, image, localUrl]);
-
-  useEffect(() => {
-    if (!viewer) return;
-    const onKey = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") setViewer(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [viewer]);
 
   async function download() {
     setBusy(true);
@@ -3564,22 +3688,11 @@ function FileAttachment({ conversationId, file, localUrl }: { conversationId: st
           aria-label="View photo"
           onClick={(event) => {
             event.stopPropagation();
-            setViewer(true);
+            onOpen?.();
           }}
         >
           <img src={url} alt="Photo" />
         </button>
-      )}
-      {viewer && url && createPortal(
-        <div className="photo-viewer" role="dialog" aria-modal="true" aria-label="Photo" onMouseDown={() => setViewer(false)}>
-          <div className="photo-viewer-frame" onMouseDown={(event) => event.stopPropagation()}>
-            <button type="button" className="photo-viewer-close" onClick={() => setViewer(false)}>
-              Close
-            </button>
-            <img src={url} alt="Photo" />
-          </div>
-        </div>,
-        document.body,
       )}
       <div className="file-card">
         <span>
