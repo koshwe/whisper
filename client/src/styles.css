@@ -113,7 +113,17 @@ button { cursor: pointer; }
 .search-line input { flex: 1; width: auto; min-width: 0; }
 .phrase { flex: none; width: auto; border: 1px solid var(--line); border-radius: 999px; padding: 6px 10px; background: transparent; color: var(--muted); font-size: 12px; }
 .phrase.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.hidden-toggle { margin: 0 16px 4px; width: auto; justify-self: start; }
 .chat-list { overflow: auto; padding: 8px; }
+.chat-item { position: relative; display: flex; align-items: center; border-radius: 14px; }
+.chat-item.active, .chat-item:hover { background: rgba(255, 255, 255, 0.04); }
+.chat-item .chat-row { flex: 1; min-width: 0; }
+.chat-item .chat-row:hover, .chat-item.active .chat-row { background: transparent; }
+.chat-more { flex: none; width: 36px; height: 36px; margin-right: 6px; border: 0; border-radius: 10px; background: transparent; color: var(--muted); font-size: 18px; letter-spacing: 1px; }
+.chat-actions { position: absolute; right: 8px; top: 46px; z-index: 3; display: grid; min-width: 132px; background: #16382f; border: 1px solid var(--line); border-radius: 12px; padding: 4px; box-shadow: var(--shadow); }
+.chat-actions button { width: 100%; background: transparent; border: 0; color: var(--text); text-align: left; border-radius: 8px; padding: 8px 10px; }
+.chat-actions button:hover { background: rgba(255, 255, 255, 0.06); }
+.chat-actions button.danger { color: var(--danger); }
 .chat-row, .chat-row.active { width: 100%; display: flex; gap: 12px; text-align: left; background: transparent; border: 0; border-radius: 14px; padding: 10px; }
 .chat-row.active, .chat-row:hover { background: rgba(255, 255, 255, 0.04); }
 .chat-copy { flex: 1; min-width: 0; }
@@ -135,6 +145,9 @@ button { cursor: pointer; }
 
 .thread { display: flex; flex-direction: column; min-width: 0; overflow: hidden; background: #23463c; }
 .thread-head { background: #2c564b; }
+.thread-head > span { flex: 1; min-width: 0; }
+.thread-head > span strong, .thread-head > span small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.head-action { width: auto; flex: none; padding: 8px 4px; font-size: 14px; font-weight: 700; }
 .thread-head .icon { width: 22px; height: 22px; }
 .messages {
   flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; padding: 18px 8% 8px;

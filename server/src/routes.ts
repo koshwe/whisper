@@ -448,6 +448,7 @@ export function registerRoutes(app: Express, db: WhisperDb, filesDir: string) {
       const peer = db.getUserByUsername(username);
       if (!peer) throw new HttpError(404, "No one uses that username.");
       const conversationId = db.openDirectConversation(user.id, peer.id);
+      db.restoreChat(conversationId, user.id);
       for (const memberId of db.listMemberIds(conversationId)) {
         const next = db.getConversation(conversationId, memberId);
         if (next) sendToUser(memberId, { type: "conversation", conversation: decorate(next) });
@@ -544,6 +545,45 @@ export function registerRoutes(app: Express, db: WhisperDb, filesDir: string) {
       for (const memberId of db.listMemberIds(conversation.id)) {
         const next = db.getConversation(conversation.id, memberId);
         if (next) sendToUser(memberId, { type: "conversation", conversation: decorate(next) });
+      }
+      res.json({ ok: true });
+    }),
+  );
+
+  app.post(
+    "/api/conversations/:id/hidden",
+    asyncRoute(async (req, res) => {
+      const user = currentUser(req, db);
+      const conversationId = req.params.id;
+      if (!db.isMember(conversationId, user.id)) throw new HttpError(404, "Chat not found.");
+      const hidden = (req.body as { hidden?: unknown }).hidden;
+      if (typeof hidden !== "boolean") throw new HttpError(400, "Say whether to hide this chat.");
+      db.setChatHidden(conversationId, user.id, hidden);
+      const conversation = db.getConversation(conversationId, user.id);
+      if (!conversation) throw new HttpError(404, "Chat not found.");
+      const decorated = decorate(conversation);
+      sendToUser(user.id, { type: "conversation", conversation: decorated });
+      res.json({ conversation: decorated });
+    }),
+  );
+
+  app.delete(
+    "/api/conversations/:id",
+    asyncRoute(async (req, res) => {
+      const user = currentUser(req, db);
+      const conversation = db.getConversation(req.params.id, user.id);
+      if (!conversation) throw new HttpError(404, "Chat not found.");
+      if (conversation.kind === "group") {
+        if (!db.removeMember(conversation.id, user.id)) throw new HttpError(404, "Chat not found.");
+        sendToUser(user.id, { type: "removed", conversationId: conversation.id });
+        for (const memberId of db.listMemberIds(conversation.id)) {
+          const next = db.getConversation(conversation.id, memberId);
+          if (next) sendToUser(memberId, { type: "conversation", conversation: decorate(next) });
+        }
+      } else if (!db.removeDirectChat(conversation.id, user.id)) {
+        throw new HttpError(404, "Chat not found.");
+      } else {
+        sendToUser(user.id, { type: "removed", conversationId: conversation.id });
       }
       res.json({ ok: true });
     }),

@@ -30,6 +30,8 @@ import {
   listMessages,
   markRead,
   openConversation,
+  setChatHidden,
+  removeChat,
   resetKeys as resetKeysRequest,
   searchUsers,
   sendMessage,
@@ -577,11 +579,16 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
   const [emojiPick, setEmojiPick] = useState("");
   const [emojiDraft, setEmojiDraft] = useState("");
   const [copiedNonce, setCopiedNonce] = useState<string | null>(null);
-  const [dialog, setDialog] = useState<null | "new" | "safety" | "profile" | "reset" | "password" | "forward" | "delete" | "group" | "people">(null);
+  const [dialog, setDialog] = useState<null | "new" | "safety" | "profile" | "reset" | "password" | "forward" | "delete" | "group" | "people" | "remove">(null);
   const [photoGallery, setPhotoGallery] = useState<{ slides: PhotoSlide[]; index: number } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ChatMessage | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
+  const [showHidden, setShowHidden] = useState(false);
+  const [chatMenuId, setChatMenuId] = useState<string | null>(null);
+  const [removeTarget, setRemoveTarget] = useState<Conversation | null>(null);
+  const [removing, setRemoving] = useState(false);
+  const [removeError, setRemoveError] = useState("");
   const [openFolders, setOpenFolders] = useState<Record<string, boolean>>({});
   const [online, setOnline] = useState<Set<string>>(new Set());
   const [typing, setTyping] = useState<Record<string, string[]>>({});
@@ -804,6 +811,17 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     if (!el || !stickRef.current) return;
     el.scrollTop = el.scrollHeight;
   }, [activeMessages, activeId, typing]);
+
+  useEffect(() => {
+    if (!chatMenuId) return;
+    const close = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest(".chat-item")) return;
+      setChatMenuId(null);
+    };
+    window.addEventListener("pointerdown", close);
+    return () => window.removeEventListener("pointerdown", close);
+  }, [chatMenuId]);
 
   function sendSocket(payload: unknown) {
     if (socketRef.current?.readyState === WebSocket.OPEN) socketRef.current.send(JSON.stringify(payload));
@@ -1153,6 +1171,8 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     }
     stickRef.current = true;
     if (activeId) repliesRef.current[activeId] = replyTo;
+    if (conversation.hidden) setShowHidden(true);
+    setChatMenuId(null);
     setActiveId(conversation.id);
     setDraft(draftsRef.current[conversation.id] ?? "");
     setReplyTo(repliesRef.current[conversation.id] ?? null);
@@ -2344,6 +2364,48 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     }
   }
 
+  async function hideChat(conversation: Conversation, hidden: boolean) {
+    setChatMenuId(null);
+    setListError("");
+    try {
+      const { conversation: next } = await setChatHidden(conversation.id, hidden);
+      replaceConversations(conversationsRef.current.map((item) => (item.id === next.id ? next : item)));
+      if (hidden && activeIdRef.current === conversation.id) {
+        setActiveId(null);
+        setMobileThread(false);
+      }
+    } catch (error) {
+      setListError(error instanceof Error ? error.message : "Couldn't update that chat.");
+    }
+  }
+
+  function askRemove(conversation: Conversation) {
+    setChatMenuId(null);
+    setRemoveTarget(conversation);
+    setRemoveError("");
+    setDialog("remove");
+  }
+
+  async function confirmRemoveChat() {
+    if (!removeTarget || removing) return;
+    setRemoving(true);
+    setRemoveError("");
+    try {
+      await removeChat(removeTarget.id);
+      replaceConversations(conversationsRef.current.filter((item) => item.id !== removeTarget.id));
+      if (activeIdRef.current === removeTarget.id) {
+        setActiveId(null);
+        setMobileThread(false);
+      }
+      setDialog(null);
+      setRemoveTarget(null);
+    } catch (error) {
+      setRemoveError(error instanceof Error ? error.message : "Couldn't remove that chat.");
+    } finally {
+      setRemoving(false);
+    }
+  }
+
   async function openHit(hit: SearchHit) {
     const conversation = conversationsRef.current.find((item) => item.id === hit.conversationId);
     if (!conversation) return;
@@ -2396,7 +2458,14 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     let cancelled = false;
     const timer = window.setTimeout(() => {
       setSearching(true);
-      void searchConversations(conversationsRef.current, wordQuery, wordPhrase, identityRef.current, user.id, () => cancelled)
+      void searchConversations(
+        conversationsRef.current.filter((item) => !item.hidden),
+        wordQuery,
+        wordPhrase,
+        identityRef.current,
+        user.id,
+        () => cancelled,
+      )
         .then((found) => {
           if (!cancelled) {
             setHits(found);
@@ -2449,7 +2518,11 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     };
   }, [chatQuery, chatPhrase, activeId, user.id]);
 
-  const visible = conversations.filter((conversation) => matchesChat(conversation, userQuery, userPhrase));
+  const hiddenChats = conversations.filter((conversation) => conversation.hidden);
+  const hiddenUnread = hiddenChats.reduce((sum, conversation) => sum + conversation.unreadCount, 0);
+  const visible = conversations.filter(
+    (conversation) => (showHidden ? conversation.hidden : !conversation.hidden) && matchesChat(conversation, userQuery, userPhrase),
+  );
   const userLookup = userQuery.trim();
   const wordLookup = wordQuery.trim();
 
@@ -2488,32 +2561,66 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
           </label>
         </div>
         {listError && <p className="error inset">{listError}</p>}
+        {(hiddenChats.length > 0 || showHidden) && (
+          <button
+            type="button"
+            className={showHidden ? "phrase on hidden-toggle" : "phrase hidden-toggle"}
+            aria-pressed={showHidden}
+            onClick={() => setShowHidden((current) => !current)}
+          >
+            {showHidden ? "All chats" : `Hidden${hiddenUnread > 0 ? ` · ${hiddenUnread}` : ""}`}
+          </button>
+        )}
         <div className="chat-list">
-          {!userLookup && visible.length === 0 && <p className="empty-list">No chats yet. Start one with a username.</p>}
+          {!userLookup && visible.length === 0 && (
+            <p className="empty-list">
+              {showHidden ? "No hidden chats." : hiddenChats.length > 0 ? "Every chat is hidden." : "No chats yet. Start one with a username."}
+            </p>
+          )}
           {userLookup && visible.length === 0 && <p className="empty-list">No users match that search.</p>}
           {visible.map((conversation) => {
             const title = chatTitle(conversation);
             const group = conversation.kind === "group";
             const someoneTyping = (typing[conversation.id]?.length ?? 0) > 0;
             return (
-            <button
-              type="button"
-              key={conversation.id}
-              className={conversation.id === activeId ? "chat-row active" : "chat-row"}
-              onClick={() => selectConversation(conversation)}
-            >
-              <Avatar name={title} username={group ? conversation.id : conversation.peer?.username || title} online={!group && conversation.peer ? online.has(conversation.peer.id) : false} />
-              <span className="chat-copy">
-                <span className="chat-topline">
-                  <strong>{title}</strong>
-                  {conversation.lastMessageAt && <time>{formatListTime(conversation.lastMessageAt)}</time>}
+            <div key={conversation.id} className={conversation.id === activeId ? "chat-item active" : "chat-item"}>
+              <button
+                type="button"
+                className="chat-row"
+                onClick={() => selectConversation(conversation)}
+              >
+                <Avatar name={title} username={group ? conversation.id : conversation.peer?.username || title} online={!group && conversation.peer ? online.has(conversation.peer.id) : false} />
+                <span className="chat-copy">
+                  <span className="chat-topline">
+                    <strong>{title}</strong>
+                    {conversation.lastMessageAt && <time>{formatListTime(conversation.lastMessageAt)}</time>}
+                  </span>
+                  <span className="chat-bottom">
+                    <em>{someoneTyping ? "typing…" : previews[conversation.id] || "Encrypted chat"}</em>
+                    {conversation.unreadCount > 0 && <span className="unread">{conversation.unreadCount}</span>}
+                  </span>
                 </span>
-                <span className="chat-bottom">
-                  <em>{someoneTyping ? "typing…" : previews[conversation.id] || "Encrypted chat"}</em>
-                  {conversation.unreadCount > 0 && <span className="unread">{conversation.unreadCount}</span>}
-                </span>
-              </span>
-            </button>
+              </button>
+              <button
+                type="button"
+                className="chat-more"
+                aria-label={`Actions for ${title}`}
+                aria-expanded={chatMenuId === conversation.id}
+                onClick={() => setChatMenuId((current) => (current === conversation.id ? null : conversation.id))}
+              >
+                ···
+              </button>
+              {chatMenuId === conversation.id && (
+                <div className="chat-actions" role="menu">
+                  <button type="button" role="menuitem" onClick={() => void hideChat(conversation, !conversation.hidden)}>
+                    {conversation.hidden ? "Unhide" : "Hide"}
+                  </button>
+                  <button type="button" role="menuitem" className="danger" onClick={() => askRemove(conversation)}>
+                    Remove
+                  </button>
+                </div>
+              )}
+            </div>
             );
           })}
         </div>
@@ -2544,6 +2651,12 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                         : "Encrypted"}
                 </small>
               </span>
+              <button type="button" className="text head-action" onClick={() => void hideChat(active, !active.hidden)}>
+                {active.hidden ? "Unhide" : "Hide"}
+              </button>
+              <button type="button" className="text head-action" onClick={() => askRemove(active)}>
+                Remove
+              </button>
               {active.kind === "group" ? (
                 <button
                   type="button"
@@ -3123,7 +3236,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                 </label>
                 <div className="forward-list">
                   {conversations
-                    .filter((conversation) => matchesChat(conversation, forwardLookup))
+                    .filter((conversation) => !conversation.hidden && matchesChat(conversation, forwardLookup))
                     .map((conversation) => {
                       const title = chatTitle(conversation);
                       const group = conversation.kind === "group";
@@ -3149,6 +3262,20 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                   {forwarding ? "Forwarding…" : "Forward to username"}
                 </button>
               </form>
+            )}
+            {dialog === "remove" && removeTarget && (
+              <div>
+                <h2>Remove chat</h2>
+                <p className="hint">
+                  {removeTarget.kind === "group"
+                    ? `Remove ${chatTitle(removeTarget)}? You leave the group. Everyone else keeps it.`
+                    : `Remove ${chatTitle(removeTarget)} from your chats? They keep the conversation. Start it again with their username.`}
+                </p>
+                {removeError && <p className="error">{removeError}</p>}
+                <button className="primary" type="button" disabled={removing} onClick={() => void confirmRemoveChat()}>
+                  {removing ? "Removing…" : "Remove"}
+                </button>
+              </div>
             )}
             {dialog === "delete" && deleteTarget && (
               <div>
