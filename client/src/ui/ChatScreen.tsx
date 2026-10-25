@@ -585,7 +585,6 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
   const [showHidden, setShowHidden] = useState(false);
-  const [chatMenuId, setChatMenuId] = useState<string | null>(null);
   const [removeTarget, setRemoveTarget] = useState<Conversation | null>(null);
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState("");
@@ -811,17 +810,6 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     if (!el || !stickRef.current) return;
     el.scrollTop = el.scrollHeight;
   }, [activeMessages, activeId, typing]);
-
-  useEffect(() => {
-    if (!chatMenuId) return;
-    const close = (event: PointerEvent) => {
-      const target = event.target;
-      if (target instanceof Element && target.closest(".chat-item")) return;
-      setChatMenuId(null);
-    };
-    window.addEventListener("pointerdown", close);
-    return () => window.removeEventListener("pointerdown", close);
-  }, [chatMenuId]);
 
   function sendSocket(payload: unknown) {
     if (socketRef.current?.readyState === WebSocket.OPEN) socketRef.current.send(JSON.stringify(payload));
@@ -1172,7 +1160,6 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     stickRef.current = true;
     if (activeId) repliesRef.current[activeId] = replyTo;
     if (conversation.hidden) setShowHidden(true);
-    setChatMenuId(null);
     setActiveId(conversation.id);
     setDraft(draftsRef.current[conversation.id] ?? "");
     setReplyTo(repliesRef.current[conversation.id] ?? null);
@@ -2364,9 +2351,16 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     }
   }
 
+  function noteChatActionError(error: unknown, fallback: string) {
+    const message = error instanceof Error ? error.message : fallback;
+    const shown = message === "Request failed." ? "Restart the Whisper server, then try Hide or Remove again." : message;
+    setListError(shown);
+    setSendError(shown);
+  }
+
   async function hideChat(conversation: Conversation, hidden: boolean) {
-    setChatMenuId(null);
     setListError("");
+    setSendError("");
     try {
       const { conversation: next } = await setChatHidden(conversation.id, hidden);
       replaceConversations(conversationsRef.current.map((item) => (item.id === next.id ? next : item)));
@@ -2374,13 +2368,13 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
         setActiveId(null);
         setMobileThread(false);
       }
+      if (!hidden) setShowHidden(false);
     } catch (error) {
-      setListError(error instanceof Error ? error.message : "Couldn't update that chat.");
+      noteChatActionError(error, "Couldn't update that chat.");
     }
   }
 
   function askRemove(conversation: Conversation) {
-    setChatMenuId(null);
     setRemoveTarget(conversation);
     setRemoveError("");
     setDialog("remove");
@@ -2400,7 +2394,11 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
       setDialog(null);
       setRemoveTarget(null);
     } catch (error) {
-      setRemoveError(error instanceof Error ? error.message : "Couldn't remove that chat.");
+      const message = error instanceof Error ? error.message : "Couldn't remove that chat.";
+      const shown = message === "Request failed." ? "Restart the Whisper server, then try Hide or Remove again." : message;
+      setRemoveError(shown);
+      setListError(shown);
+      setSendError(shown);
     } finally {
       setRemoving(false);
     }
@@ -2601,25 +2599,14 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                   </span>
                 </span>
               </button>
-              <button
-                type="button"
-                className="chat-more"
-                aria-label={`Actions for ${title}`}
-                aria-expanded={chatMenuId === conversation.id}
-                onClick={() => setChatMenuId((current) => (current === conversation.id ? null : conversation.id))}
-              >
-                ···
-              </button>
-              {chatMenuId === conversation.id && (
-                <div className="chat-actions" role="menu">
-                  <button type="button" role="menuitem" onClick={() => void hideChat(conversation, !conversation.hidden)}>
-                    {conversation.hidden ? "Unhide" : "Hide"}
-                  </button>
-                  <button type="button" role="menuitem" className="danger" onClick={() => askRemove(conversation)}>
-                    Remove
-                  </button>
-                </div>
-              )}
+              <div className="chat-row-actions">
+                <button type="button" className="text" onClick={() => void hideChat(conversation, !conversation.hidden)}>
+                  {conversation.hidden ? "Unhide" : "Hide"}
+                </button>
+                <button type="button" className="text danger" onClick={() => askRemove(conversation)}>
+                  Remove
+                </button>
+              </div>
             </div>
             );
           })}
@@ -2654,7 +2641,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
               <button type="button" className="text head-action" onClick={() => void hideChat(active, !active.hidden)}>
                 {active.hidden ? "Unhide" : "Hide"}
               </button>
-              <button type="button" className="text head-action" onClick={() => askRemove(active)}>
+              <button type="button" className="text head-action danger" onClick={() => askRemove(active)}>
                 Remove
               </button>
               {active.kind === "group" ? (
