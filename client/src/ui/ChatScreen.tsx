@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent, type MouseEvent } from "react";
 import { createPortal } from "react-dom";
 import {
   decryptFile,
@@ -586,6 +586,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
   const [deleteError, setDeleteError] = useState("");
   const [showHidden, setShowHidden] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<Conversation | null>(null);
+  const [nameMenu, setNameMenu] = useState<{ conversationId: string; x: number; y: number } | null>(null);
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState("");
   const [openFolders, setOpenFolders] = useState<Record<string, boolean>>({});
@@ -810,6 +811,22 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     if (!el || !stickRef.current) return;
     el.scrollTop = el.scrollHeight;
   }, [activeMessages, activeId, typing]);
+
+  useEffect(() => {
+    if (!nameMenu) return;
+    const close = () => setNameMenu(null);
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setNameMenu(null);
+    };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, [nameMenu]);
 
   function sendSocket(payload: unknown) {
     if (socketRef.current?.readyState === WebSocket.OPEN) socketRef.current.send(JSON.stringify(payload));
@@ -2374,6 +2391,14 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     }
   }
 
+  function openNameMenu(event: MouseEvent, conversation: Conversation) {
+    event.preventDefault();
+    event.stopPropagation();
+    const left = Math.min(event.clientX, window.innerWidth - 168);
+    const top = Math.min(event.clientY, window.innerHeight - 96);
+    setNameMenu({ conversationId: conversation.id, x: Math.max(8, left), y: Math.max(8, top) });
+  }
+
   function askRemove(conversation: Conversation) {
     setRemoveTarget(conversation);
     setRemoveError("");
@@ -2590,7 +2615,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                 <Avatar name={title} username={group ? conversation.id : conversation.peer?.username || title} online={!group && conversation.peer ? online.has(conversation.peer.id) : false} />
                 <span className="chat-copy">
                   <span className="chat-topline">
-                    <strong>{title}</strong>
+                    <strong onContextMenu={(event) => openNameMenu(event, conversation)}>{title}</strong>
                     {conversation.lastMessageAt && <time>{formatListTime(conversation.lastMessageAt)}</time>}
                   </span>
                   <span className="chat-bottom">
@@ -2599,14 +2624,6 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                   </span>
                 </span>
               </button>
-              <div className="chat-row-actions">
-                <button type="button" className="text" onClick={() => void hideChat(conversation, !conversation.hidden)}>
-                  {conversation.hidden ? "Unhide" : "Hide"}
-                </button>
-                <button type="button" className="text danger" onClick={() => askRemove(conversation)}>
-                  Remove
-                </button>
-              </div>
             </div>
             );
           })}
@@ -2625,7 +2642,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                 online={active.kind !== "group" && active.peer ? online.has(active.peer.id) : false}
               />
               <span>
-                <strong>{chatTitle(active)}</strong>
+                <strong onContextMenu={(event) => openNameMenu(event, active)}>{chatTitle(active)}</strong>
                 <small>
                   {(typing[active.id]?.length ?? 0) > 0
                     ? active.kind === "group"
@@ -2638,12 +2655,6 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                         : "Encrypted"}
                 </small>
               </span>
-              <button type="button" className="text head-action" onClick={() => void hideChat(active, !active.hidden)}>
-                {active.hidden ? "Unhide" : "Hide"}
-              </button>
-              <button type="button" className="text head-action danger" onClick={() => askRemove(active)}>
-                Remove
-              </button>
               {active.kind === "group" ? (
                 <button
                   type="button"
@@ -3463,6 +3474,41 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
           </div>
         </div>
       )}
+      {nameMenu && (() => {
+        const conversation = conversations.find((item) => item.id === nameMenu.conversationId);
+        if (!conversation) return null;
+        return createPortal(
+          <div
+            className="name-menu"
+            role="menu"
+            style={{ left: nameMenu.x, top: nameMenu.y }}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setNameMenu(null);
+                void hideChat(conversation, !conversation.hidden);
+              }}
+            >
+              {conversation.hidden ? "Unhide" : "Hide"}
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="danger"
+              onClick={() => {
+                setNameMenu(null);
+                askRemove(conversation);
+              }}
+            >
+              Remove
+            </button>
+          </div>,
+          document.body,
+        );
+      })()}
       {photoFile && (
         <PhotoEditor
           file={photoFile}

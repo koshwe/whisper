@@ -119,8 +119,11 @@ button { cursor: pointer; }
 .chat-item.active, .chat-item:hover { background: rgba(255, 255, 255, 0.04); }
 .chat-item .chat-row { flex: 1; min-width: 0; }
 .chat-item .chat-row:hover, .chat-item.active .chat-row { background: transparent; }
-.chat-row-actions { display: flex; flex-direction: column; flex: none; padding-right: 8px; }
-.chat-row-actions .text { padding: 2px 6px; font-size: 13px; font-weight: 700; }
+.chat-topline strong, .thread-head > span strong { cursor: context-menu; }
+.name-menu { position: fixed; z-index: 40; display: grid; min-width: 140px; background: #16382f; border: 1px solid var(--line); border-radius: 12px; padding: 4px; box-shadow: var(--shadow); }
+.name-menu button { width: 100%; background: transparent; border: 0; color: var(--text); text-align: left; border-radius: 8px; padding: 8px 10px; }
+.name-menu button:hover { background: rgba(255, 255, 255, 0.06); }
+.name-menu button.danger { color: var(--danger); }
 .chat-row, .chat-row.active { width: 100%; display: flex; gap: 12px; text-align: left; background: transparent; border: 0; border-radius: 14px; padding: 10px; }
 .chat-row.active, .chat-row:hover { background: rgba(255, 255, 255, 0.04); }
 .chat-copy { flex: 1; min-width: 0; }
@@ -141,11 +144,9 @@ button { cursor: pointer; }
 .back { display: none; }
 
 .thread { display: flex; flex-direction: column; min-width: 0; overflow: hidden; background: #23463c; }
-.thread-head { background: #2c564b; flex-wrap: wrap; }
-.head-action.danger { color: var(--danger); }
+.thread-head { background: #2c564b; }
 .thread-head > span { flex: 1; min-width: 0; }
 .thread-head > span strong, .thread-head > span small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.head-action { width: auto; flex: none; padding: 8px 4px; font-size: 14px; font-weight: 700; }
 .thread-head .icon { width: 22px; height: 22px; }
 .messages {
   flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; padding: 18px 8% 8px;
