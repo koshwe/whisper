@@ -97,6 +97,47 @@ type ChatScreenProps = {
 
 const REACTION_EMOJI = ["👍", "❤️", "😂", "😮", "😢", "🙏", "🔥", "🎉"];
 
+function SearchLine({
+  value,
+  onChange,
+  placeholder,
+  label,
+  phrase,
+  onPhrase,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  label: string;
+  phrase: boolean;
+  onPhrase: () => void;
+}) {
+  return (
+    <div className="search-line">
+      <span className="search-field">
+        <input value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} aria-label={label} />
+        {value && (
+          <button
+            type="button"
+            className="search-clear"
+            aria-label={`Clear ${label}`}
+            onClick={(event) => {
+              onChange("");
+              const field = event.currentTarget.parentElement?.querySelector("input");
+              if (field instanceof HTMLInputElement) field.focus();
+            }}
+          >
+            ×
+          </button>
+        )}
+      </span>
+      <button type="button" className={phrase ? "phrase on" : "phrase"} aria-pressed={phrase} onClick={onPhrase}>
+        Search
+      </button>
+    </div>
+  );
+}
+
 function singleEmoji(value: string) {
   if (!value.trim() || typeof Intl.Segmenter !== "function") return "";
   const parts = [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(value)].map((part) => part.segment);
@@ -2576,12 +2617,14 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
           </button>
         </header>
         <div className="side-search">
-          <label className="search-line">
-            <input value={userQuery} onChange={(event) => setUserQuery(event.target.value)} placeholder="Name or username" aria-label="Name or username" />
-            <button type="button" className={userPhrase ? "phrase on" : "phrase"} aria-pressed={userPhrase} onClick={() => setUserPhrase((current) => !current)}>
-              Search
-            </button>
-          </label>
+          <SearchLine
+            value={userQuery}
+            onChange={setUserQuery}
+            placeholder="Name or username"
+            label="Name or username"
+            phrase={userPhrase}
+            onPhrase={() => setUserPhrase((current) => !current)}
+          />
         </div>
         {listError && <p className="error inset">{listError}</p>}
         {(hiddenChats.length > 0 || showHidden) && (
@@ -2688,12 +2731,14 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                   {!chatSearching && chatHits.length === 0 && <p className="empty-list">No messages in this chat match that search.</p>}
                 </div>
               )}
-              <label className="search-line">
-                <input value={chatQuery} onChange={(event) => setChatQuery(event.target.value)} placeholder="Search this chat" aria-label="Search this chat" />
-                <button type="button" className={chatPhrase ? "phrase on" : "phrase"} aria-pressed={chatPhrase} onClick={() => setChatPhrase((current) => !current)}>
-                  Search
-                </button>
-              </label>
+              <SearchLine
+                value={chatQuery}
+                onChange={setChatQuery}
+                placeholder="Search this chat"
+                label="Search this chat"
+                phrase={chatPhrase}
+                onPhrase={() => setChatPhrase((current) => !current)}
+              />
             </div>
             {(pins[active.id] ?? []).length > 0 && (
               <div className="pin-bar" aria-label="Pinned messages">
@@ -3181,13 +3226,14 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
             {!searching && hits.length === 0 && <p className="empty-list">No messages match that search.</p>}
           </div>
         )}
-        <label className="search-line">
-          <span className="sr">Search all chats</span>
-          <input value={wordQuery} onChange={(event) => setWordQuery(event.target.value)} placeholder="Search all chats" aria-label="Search all chats" />
-          <button type="button" className={wordPhrase ? "phrase on" : "phrase"} aria-pressed={wordPhrase} onClick={() => setWordPhrase((current) => !current)}>
-            Search
-          </button>
-        </label>
+        <SearchLine
+          value={wordQuery}
+          onChange={setWordQuery}
+          placeholder="Search all chats"
+          label="Search all chats"
+          phrase={wordPhrase}
+          onPhrase={() => setWordPhrase((current) => !current)}
+        />
       </div>}
       {dialog && (
         <div className="dialog-backdrop" onMouseDown={() => setDialog(null)}>
