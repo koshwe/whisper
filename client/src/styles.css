@@ -68,7 +68,7 @@ button { cursor: pointer; }
 .segmented button { border: 0; background: transparent; border-radius: 10px; padding: 10px; color: var(--muted); }
 .segmented button.on { background: #173027; color: var(--text); }
 .field { display: grid; gap: 8px; margin-bottom: 14px; color: var(--muted); font-size: 14px; }
-.field input, .side-search input, .word-search input, .chat-search input, .composer textarea {
+.field input, .side-search input, .word-search input, .chat-search input, .thread-head .search-field input, .composer textarea {
   width: 100%; border: 1px solid var(--line); background: #0b1612; border-radius: 12px; padding: 12px 14px;
 }
 .password-row { display: flex; gap: 8px; }
@@ -141,7 +141,7 @@ button { cursor: pointer; }
 .empty-list { color: var(--muted); padding: 16px; }
 .search-hit { align-items: flex-start; }
 .search-hit em { color: var(--muted); font-style: normal; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.chat-search { flex: none; border-bottom: 1px solid var(--line); background: #2c564b; padding: 10px 16px; display: grid; gap: 8px; }
+.chat-search { flex: none; border-bottom: 1px solid var(--line); background: #2c564b; padding: 8px 16px; display: grid; gap: 8px; }
 .word-search { border-top: 1px solid var(--line); background: var(--sidebar); padding: 12px 16px 16px; display: grid; gap: 8px; min-width: 0; }
 .word-search label { color: var(--muted); font-size: 12px; }
 .word-hits { max-height: 240px; overflow: auto; display: grid; gap: 2px; }
@@ -153,8 +153,10 @@ button { cursor: pointer; }
 
 .thread { display: flex; flex-direction: column; min-width: 0; overflow: hidden; background: #23463c; }
 .thread-head { background: #2c564b; }
-.thread-head > span { flex: 1; min-width: 0; }
+.thread-head > span { flex: 0 1 220px; min-width: 0; }
 .thread-head > span strong, .thread-head > span small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-head .head-search { flex: 1; min-width: 140px; }
+.thread-head .search-field input { padding-top: 8px; padding-bottom: 8px; }
 .thread-head .icon { width: 22px; height: 22px; }
 .messages {
   flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; padding: 18px 8% 8px;

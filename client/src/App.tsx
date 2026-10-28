@@ -22,6 +22,7 @@ import {
   type Account,
 } from "./api";
 import { clearIdentity, loadIdentity, saveIdentity } from "./idb";
+import { releaseBrowser } from "./fill-window";
 import { AuthScreen } from "./ui/AuthScreen";
 import { ChatScreen } from "./ui/ChatScreen";
 import { KeyGate } from "./ui/KeyGate";
@@ -138,6 +139,7 @@ export function App() {
     setUser(null);
     setIdentity(null);
     setPhase("auth");
+    releaseBrowser();
   }
 
   if (!globalThis.crypto?.subtle) {

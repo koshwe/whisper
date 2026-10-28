@@ -48,6 +48,7 @@ import {
   type ServerMessage,
 } from "../api";
 import { saveIdentity } from "../idb";
+import { fillBrowser } from "../fill-window";
 import { PhotoEditor } from "./PhotoEditor";
 
 type SearchHit = {
@@ -104,6 +105,7 @@ function SearchLine({
   label,
   phrase,
   onPhrase,
+  className,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -111,9 +113,10 @@ function SearchLine({
   label: string;
   phrase: boolean;
   onPhrase: () => void;
+  className?: string;
 }) {
   return (
-    <div className="search-line">
+    <div className={className ? `search-line ${className}` : "search-line"}>
       <span className="search-field">
         <input value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} aria-label={label} />
         {value && (
@@ -852,6 +855,15 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     if (!el || !stickRef.current) return;
     el.scrollTop = el.scrollHeight;
   }, [activeMessages, activeId, typing]);
+
+  useEffect(() => {
+    const expand = () => {
+      fillBrowser();
+      window.removeEventListener("pointerdown", expand);
+    };
+    window.addEventListener("pointerdown", expand);
+    return () => window.removeEventListener("pointerdown", expand);
+  }, []);
 
   useEffect(() => {
     if (!nameMenu) return;
@@ -2698,6 +2710,15 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                         : "Encrypted"}
                 </small>
               </span>
+              <SearchLine
+                className="head-search"
+                value={chatQuery}
+                onChange={setChatQuery}
+                placeholder="Search this chat"
+                label="Search this chat"
+                phrase={chatPhrase}
+                onPhrase={() => setChatPhrase((current) => !current)}
+              />
               {active.kind === "group" ? (
                 <button
                   type="button"
@@ -2717,8 +2738,8 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                 </button>
               )}
             </header>
-            <div className="chat-search">
-              {chatQuery.trim() && (
+            {chatQuery.trim() && (
+              <div className="chat-search">
                 <div className="word-hits">
                   {chatSearching && <p className="empty-list">Searching this chat…</p>}
                   {chatHits.map((hit) => (
@@ -2730,16 +2751,8 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                   ))}
                   {!chatSearching && chatHits.length === 0 && <p className="empty-list">No messages in this chat match that search.</p>}
                 </div>
-              )}
-              <SearchLine
-                value={chatQuery}
-                onChange={setChatQuery}
-                placeholder="Search this chat"
-                label="Search this chat"
-                phrase={chatPhrase}
-                onPhrase={() => setChatPhrase((current) => !current)}
-              />
-            </div>
+              </div>
+            )}
             {(pins[active.id] ?? []).length > 0 && (
               <div className="pin-bar" aria-label="Pinned messages">
                 <p className="pin-count">Pinned {(pins[active.id] ?? []).length}/5</p>
