@@ -2688,28 +2688,30 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
         {active ? (
           <>
             <header className="thread-head">
-              <button type="button" className="back" onClick={() => setMobileThread(false)} aria-label="Back to chats">
-                ←
-              </button>
-              <Avatar
-                name={chatTitle(active)}
-                username={active.kind === "group" ? active.id : active.peer?.username || chatTitle(active)}
-                online={active.kind !== "group" && active.peer ? online.has(active.peer.id) : false}
-              />
-              <span>
-                <strong onContextMenu={(event) => openNameMenu(event, active)}>{chatTitle(active)}</strong>
-                <small>
-                  {(typing[active.id]?.length ?? 0) > 0
-                    ? active.kind === "group"
-                      ? `${(typing[active.id] ?? []).map((id) => personName(active, id, user.id)).filter((name) => name !== "You").join(", ") || "Someone"} typing…`
-                      : "typing…"
-                    : active.kind === "group"
-                      ? `${active.members.length + 1} people · encrypted`
-                      : active.peer && online.has(active.peer.id)
-                        ? "Online · encrypted"
-                        : "Encrypted"}
-                </small>
-              </span>
+              <div className="thread-who">
+                <button type="button" className="back" onClick={() => setMobileThread(false)} aria-label="Back to chats">
+                  ←
+                </button>
+                <Avatar
+                  name={chatTitle(active)}
+                  username={active.kind === "group" ? active.id : active.peer?.username || chatTitle(active)}
+                  online={active.kind !== "group" && active.peer ? online.has(active.peer.id) : false}
+                />
+                <span>
+                  <strong onContextMenu={(event) => openNameMenu(event, active)}>{chatTitle(active)}</strong>
+                  <small>
+                    {(typing[active.id]?.length ?? 0) > 0
+                      ? active.kind === "group"
+                        ? `${(typing[active.id] ?? []).map((id) => personName(active, id, user.id)).filter((name) => name !== "You").join(", ") || "Someone"} typing…`
+                        : "typing…"
+                      : active.kind === "group"
+                        ? `${active.members.length + 1} people · encrypted`
+                        : active.peer && online.has(active.peer.id)
+                          ? "Online · encrypted"
+                          : "Encrypted"}
+                  </small>
+                </span>
+              </div>
               <SearchLine
                 className="head-search"
                 value={chatQuery}

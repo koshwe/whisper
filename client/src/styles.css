@@ -127,7 +127,7 @@ button { cursor: pointer; }
 .chat-item.active, .chat-item:hover { background: rgba(255, 255, 255, 0.04); }
 .chat-item .chat-row { flex: 1; min-width: 0; }
 .chat-item .chat-row:hover, .chat-item.active .chat-row { background: transparent; }
-.chat-topline strong, .thread-head > span strong { cursor: context-menu; }
+.chat-topline strong, .thread-who strong { cursor: context-menu; }
 .name-menu { position: fixed; z-index: 40; display: grid; min-width: 140px; background: #16382f; border: 1px solid var(--line); border-radius: 12px; padding: 4px; box-shadow: var(--shadow); }
 .name-menu button { width: 100%; background: transparent; border: 0; color: var(--text); text-align: left; border-radius: 8px; padding: 8px 10px; }
 .name-menu button:hover { background: rgba(255, 255, 255, 0.06); }
@@ -152,10 +152,17 @@ button { cursor: pointer; }
 .back { display: none; }
 
 .thread { display: flex; flex-direction: column; min-width: 0; overflow: hidden; background: #23463c; }
-.thread-head { background: #2c564b; }
-.thread-head > span { flex: 0 1 220px; min-width: 0; }
-.thread-head > span strong, .thread-head > span small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.thread-head .head-search { flex: 1; min-width: 140px; }
+.thread-head { background: #2c564b; gap: 8px; padding: 8px 12px; }
+.thread-who { display: flex; align-items: center; gap: 4px; flex: 0 1 auto; min-width: 0; max-width: 168px; }
+.thread-who .back { width: 26px; height: 26px; font-size: 18px; }
+.thread-who .avatar { width: 28px; height: 28px; font-size: 12px; }
+.thread-who .presence { width: 8px; height: 8px; border-width: 1px; }
+.thread-who > span { min-width: 0; }
+.thread-who strong { font-size: 14px; line-height: 1.15; }
+.thread-who small { font-size: 11px; line-height: 1.15; }
+.thread-who strong, .thread-who small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-head .head-search { flex: 1 1 auto; min-width: 0; }
+.thread-head .head-search .search-field { flex: 1 1 auto; }
 .thread-head .search-field input { padding-top: 8px; padding-bottom: 8px; }
 .thread-head .icon { width: 22px; height: 22px; }
 .messages {
