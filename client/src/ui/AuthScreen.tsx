@@ -1,5 +1,4 @@
 import { useState, type FormEvent } from "react";
-import { fillBrowser, releaseBrowser } from "../fill-window";
 
 const USERNAME = /^[a-z0-9_]{3,20}$/;
 
@@ -37,12 +36,10 @@ export function AuthScreen({ googleEnabled, notice, onLogin, onRegister }: AuthS
     }
     setBusy(true);
     setError(null);
-    fillBrowser();
     try {
       if (mode === "login") await onLogin(normalized, password);
       else await onRegister(normalized, displayName.trim() || normalized, password);
     } catch (caught) {
-      releaseBrowser();
       setError(caught instanceof Error ? caught.message : "Something went wrong.");
     } finally {
       setBusy(false);

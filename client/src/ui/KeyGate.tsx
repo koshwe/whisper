@@ -1,6 +1,5 @@
 import { useState, type FormEvent } from "react";
 import type { Account } from "../api";
-import { fillBrowser, releaseBrowser } from "../fill-window";
 
 type KeyGateProps = {
   mode: "setup" | "unlock";
@@ -36,12 +35,10 @@ export function KeyGate({ mode, account, onSubmit, onReset, onLogout }: KeyGateP
     }
     setBusy(true);
     setError(null);
-    fillBrowser();
     try {
       if (resetting) await onReset(password);
       else await onSubmit(password);
     } catch (caught) {
-      releaseBrowser();
       setError(caught instanceof Error ? caught.message : "Something went wrong.");
     } finally {
       setBusy(false);

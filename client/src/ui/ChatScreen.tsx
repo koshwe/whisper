@@ -48,8 +48,34 @@ import {
   type ServerMessage,
 } from "../api";
 import { saveIdentity } from "../idb";
-import { fillBrowser } from "../fill-window";
 import { PhotoEditor } from "./PhotoEditor";
+
+type MenuPoint = { top: number; left: number };
+
+function fitMenu(anchor: DOMRect, menu: DOMRect, align: "left" | "right"): MenuPoint {
+  const margin = 8;
+  const gap = 4;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  let left = align === "right" ? anchor.right - menu.width : anchor.left;
+  const maxLeft = vw - margin - menu.width;
+  if (left > maxLeft) left = maxLeft;
+  if (left < margin) left = margin;
+  const belowTop = anchor.bottom + gap;
+  const aboveTop = anchor.top - gap - menu.height;
+  const fitsBelow = belowTop + menu.height <= vh - margin;
+  const fitsAbove = aboveTop >= margin;
+  let top = belowTop;
+  if (!fitsBelow && fitsAbove) top = aboveTop;
+  else if (!fitsBelow && !fitsAbove) {
+    const spaceBelow = vh - margin - belowTop;
+    const spaceAbove = anchor.top - gap - margin;
+    top = spaceAbove > spaceBelow ? margin : Math.max(margin, vh - margin - menu.height);
+  }
+  if (top < margin) top = margin;
+  if (top + menu.height > vh - margin) top = Math.max(margin, vh - margin - menu.height);
+  return { top: Math.round(top), left: Math.round(left) };
+}
 
 type SearchHit = {
   conversationId: string;
@@ -620,6 +646,12 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
   const [chatSearching, setChatSearching] = useState(false);
   const [actionMenu, setActionMenu] = useState<string | null>(null);
   const [reactMenu, setReactMenu] = useState<string | null>(null);
+  const [actionBox, setActionBox] = useState<MenuPoint | null>(null);
+  const [reactBox, setReactBox] = useState<MenuPoint | null>(null);
+  const actionAnchorRef = useRef<HTMLButtonElement | null>(null);
+  const reactAnchorRef = useRef<HTMLButtonElement | null>(null);
+  const actionMenuRef = useRef<HTMLSpanElement | null>(null);
+  const reactMenuRef = useRef<HTMLSpanElement | null>(null);
   const [emojiPick, setEmojiPick] = useState("");
   const [emojiDraft, setEmojiDraft] = useState("");
   const [copiedNonce, setCopiedNonce] = useState<string | null>(null);
@@ -856,14 +888,41 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     el.scrollTop = el.scrollHeight;
   }, [activeMessages, activeId, typing]);
 
-  useEffect(() => {
-    const expand = () => {
-      fillBrowser();
-      window.removeEventListener("pointerdown", expand);
+  useLayoutEffect(() => {
+    if (!actionMenu) {
+      setActionBox(null);
+      return;
+    }
+    const place = () => {
+      const anchor = actionAnchorRef.current;
+      const menu = actionMenuRef.current;
+      if (!anchor || !menu) return;
+      const align = anchor.closest(".message-row")?.classList.contains("out") ? "right" : "left";
+      const next = fitMenu(anchor.getBoundingClientRect(), menu.getBoundingClientRect(), align);
+      setActionBox((current) => (current && current.top === next.top && current.left === next.left ? current : next));
     };
-    window.addEventListener("pointerdown", expand);
-    return () => window.removeEventListener("pointerdown", expand);
-  }, []);
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+  }, [actionMenu]);
+
+  useLayoutEffect(() => {
+    if (!reactMenu) {
+      setReactBox(null);
+      return;
+    }
+    const place = () => {
+      const anchor = reactAnchorRef.current;
+      const menu = reactMenuRef.current;
+      if (!anchor || !menu) return;
+      const align = anchor.closest(".message-row")?.classList.contains("out") ? "right" : "left";
+      const next = fitMenu(anchor.getBoundingClientRect(), menu.getBoundingClientRect(), align);
+      setReactBox((current) => (current && current.top === next.top && current.left === next.left ? current : next));
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+  }, [reactMenu, emojiPick]);
 
   useEffect(() => {
     if (!nameMenu) return;
@@ -1209,13 +1268,21 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
 
   useEffect(() => {
     if (!actionMenu && !reactMenu) return;
-    const close = () => {
+    const close = (event?: Event) => {
+      if (event?.type === "scroll") {
+        const target = event.target;
+        if (target instanceof Node && (actionMenuRef.current?.contains(target) || reactMenuRef.current?.contains(target))) return;
+      }
       setActionMenu(null);
       setReactMenu(null);
       setEmojiPick("");
     };
     window.addEventListener("pointerdown", close);
-    return () => window.removeEventListener("pointerdown", close);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("scroll", close, true);
+    };
   }, [actionMenu, reactMenu]);
 
   function selectConversation(conversation: Conversation) {
@@ -2797,7 +2864,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
               {(() => {
                 const byNonce = new Map(activeMessages.map((item) => [item.nonce, item]));
                 const visible = activeMessages.filter((item) => collectorNonce(item, byNonce) === null);
-                const renderBubble = (message: ChatMessage, nested: boolean, menuUp: boolean) => {
+                const renderBubble = (message: ChatMessage, nested: boolean) => {
                   const mine = message.senderId === user.id;
                   const read = Boolean(active.peerLastReadAt && message.createdAt <= active.peerLastReadAt);
                   const canAct = !message.failed && Boolean(message.text.trim() || message.file);
@@ -2834,7 +2901,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                     )}
                     <article
                       id={`msg-${message.nonce}`}
-                      className={`message-row ${mine ? "out" : "in"}${message.id === editingId ? " editing" : ""}${menuUp ? " menu-up" : ""}`}
+                      className={`message-row ${mine ? "out" : "in"}${message.id === editingId ? " editing" : ""}`}
                       onContextMenu={(event) => {
                         if (!canSelect(message)) return;
                         event.preventDefault();
@@ -2893,15 +2960,23 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                             className="dots"
                             aria-label="Message actions"
                             aria-expanded={actionMenu === message.nonce}
-                            onClick={() => {
+                            onClick={(event) => {
                               setReactMenu(null);
+                              setEmojiPick("");
+                              actionAnchorRef.current = event.currentTarget;
                               setActionMenu((current) => (current === message.nonce ? null : message.nonce));
                             }}
                           >
                             <DotsGlyph />
                           </button>
-                          {actionMenu === message.nonce && (
-                        <span className="bubble-actions" role="menu">
+                          {actionMenu === message.nonce && createPortal(
+                        <span
+                          className={actionBox ? "bubble-actions placed" : "bubble-actions"}
+                          role="menu"
+                          ref={actionMenuRef}
+                          style={actionBox ? { top: actionBox.top, left: actionBox.left } : undefined}
+                          onPointerDown={(event) => event.stopPropagation()}
+                        >
                           {!message.failed && Boolean(message.text.trim() || message.file) && (
                                 <button type="button" role="menuitem" onClick={() => void copyMessage(message)}>Copy</button>
                               )}
@@ -2930,7 +3005,8 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                               {canDelete && (
                                 <button type="button" role="menuitem" className="danger" onClick={() => { setActionMenu(null); beginDelete(message); }}>Delete</button>
                               )}
-                            </span>
+                            </span>,
+                        document.body,
                           )}
                         </span>
                       )}
@@ -2953,8 +3029,8 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                           {open && (
                             <div className="folder-replies">
                               {gathered.length === 0 && <p className="folder-empty">Replies will gather here.</p>}
-                              {gathered.map((reply, replyIndex) => (
-                                <Fragment key={reply.nonce}>{renderBubble(reply, true, menuUp && replyIndex === gathered.length - 1)}</Fragment>
+                              {gathered.map((reply) => (
+                                <Fragment key={reply.nonce}>{renderBubble(reply, true)}</Fragment>
                               ))}
                             </div>
                           )}
@@ -2988,15 +3064,21 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                             className="react-open"
                             aria-label="React"
                             aria-expanded={reactMenu === message.nonce}
-                            onClick={() => {
+                            onClick={(event) => {
                               setActionMenu(null);
+                              reactAnchorRef.current = event.currentTarget;
                               setReactMenu((current) => (current === message.nonce ? null : message.nonce));
                             }}
                           >
                             ☺
                           </button>
-                          {reactMenu === message.nonce && (
-                            <span className="react-row">
+                          {reactMenu === message.nonce && createPortal(
+                            <span
+                              className={reactBox ? "react-row placed" : "react-row"}
+                              ref={reactMenuRef}
+                              style={reactBox ? { top: reactBox.top, left: reactBox.left } : undefined}
+                              onPointerDown={(event) => event.stopPropagation()}
+                            >
                               {REACTION_EMOJI.map((emoji) => (
                                 <button
                                   type="button"
@@ -3037,7 +3119,8 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                                   }}
                                 />
                               )}
-                            </span>
+                            </span>,
+                            document.body,
                           )}
                         </span>
                       )}
@@ -3053,7 +3136,6 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                   if (!last || last.key !== key) groups.push({ key, label: dayLabel(message.createdAt), messages: [message] });
                   else last.messages.push(message);
                 }
-                const lastNonce = visible[visible.length - 1]?.nonce;
                 return groups.map((group) => {
                   const today = group.key === todayKey;
                   const open = today || Boolean(openDays[`${active.id}:${group.key}`]);
@@ -3076,7 +3158,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                           <span className="day-count">{group.messages.length === 1 ? "1 message" : `${group.messages.length} messages`}</span>
                         </button>
                       )}
-                      {open && group.messages.map((message) => renderBubble(message, false, message.nonce === lastNonce))}
+                      {open && group.messages.map((message) => renderBubble(message, false))}
                     </Fragment>
                   );
                 });
