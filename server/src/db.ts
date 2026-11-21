@@ -88,6 +88,7 @@ export type ConversationSummary = {
   lastMessageAt: string | null;
   unreadCount: number;
   peerLastReadAt: string | null;
+  hidden: boolean;
   viewerRole: "admin" | "member" | null;
   peer: PublicUser | null;
   members: MemberUser[];
@@ -286,6 +287,12 @@ export function openDatabase(dbPath: string) {
   if (!memberColumns.some((column) => column.name === "role")) {
     db.exec("ALTER TABLE members ADD COLUMN role TEXT NOT NULL DEFAULT 'member'");
   }
+  if (!memberColumns.some((column) => column.name === "hidden")) {
+    db.exec("ALTER TABLE members ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!memberColumns.some((column) => column.name === "removed")) {
+    db.exec("ALTER TABLE members ADD COLUMN removed INTEGER NOT NULL DEFAULT 0");
+  }
   const groupsMissingAdmin = db.prepare(`
     SELECT id FROM conversations
     WHERE kind = 'group'
@@ -337,7 +344,7 @@ export function openDatabase(dbPath: string) {
   const listConversationRows = db.prepare(`
     SELECT id, kind, title, created_at, last_message_at
     FROM conversations
-    WHERE id IN (SELECT conversation_id FROM members WHERE user_id = ?)
+    WHERE id IN (SELECT conversation_id FROM members WHERE user_id = ? AND removed = 0)
     ORDER BY COALESCE(last_message_at, created_at) DESC
   `);
   const otherMembers = db.prepare(`
@@ -351,7 +358,10 @@ export function openDatabase(dbPath: string) {
   const earliestMemberId = db.prepare("SELECT user_id FROM members WHERE conversation_id = ? ORDER BY rowid ASC LIMIT 1");
   const memberIdRows = db.prepare("SELECT user_id AS id FROM members WHERE conversation_id = ?");
   const conversationKind = db.prepare("SELECT kind FROM conversations WHERE id = ?");
-  const memberRead = db.prepare("SELECT last_read_at FROM members WHERE conversation_id = ? AND user_id = ?");
+  const memberRead = db.prepare("SELECT last_read_at, hidden FROM members WHERE conversation_id = ? AND user_id = ?");
+  const setHidden = db.prepare("UPDATE members SET hidden = ? WHERE conversation_id = ? AND user_id = ?");
+  const setRemoved = db.prepare("UPDATE members SET removed = ? WHERE conversation_id = ? AND user_id = ?");
+  const restoreMembership = db.prepare("UPDATE members SET hidden = 0, removed = 0 WHERE conversation_id = ? AND user_id = ?");
   const lastMessage = db.prepare(
     "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 1",
   );
@@ -530,7 +540,7 @@ export function openDatabase(dbPath: string) {
     const peer = kind === "direct" ? others[0] : null;
     const roleRow = memberRole.get(conversation.id, userId) as { role: string } | undefined;
     const viewerRole = kind === "group" ? (roleRow?.role === "admin" ? "admin" : "member") : null;
-    const mine = memberRead.get(conversation.id, userId) as { last_read_at: string | null } | undefined;
+    const mine = memberRead.get(conversation.id, userId) as { last_read_at: string | null; hidden: number | null } | undefined;
     const readAt = mine?.last_read_at ?? null;
     const unread = kind === "group"
       ? (groupUnread.get(userId, conversation.id, userId, readAt) as { count: number })
@@ -551,6 +561,7 @@ export function openDatabase(dbPath: string) {
       lastMessageAt: conversation.last_message_at,
       unreadCount: Number(unread.count),
       peerLastReadAt,
+      hidden: Number(mine?.hidden ?? 0) === 1,
       viewerRole,
       peer,
       members: others,
@@ -640,7 +651,11 @@ export function openDatabase(dbPath: string) {
     openDirectConversation(userA: string, userB: string) {
       const key = [userA, userB].sort().join(":");
       const existing = conversationByKey.get(key) as { id: string } | undefined;
-      if (existing) return existing.id;
+      if (existing) {
+        if (!memberExists.get(existing.id, userA)) insertMember.run(existing.id, userA, "member");
+        if (!memberExists.get(existing.id, userB)) insertMember.run(existing.id, userB, "member");
+        return existing.id;
+      }
       const id = crypto.randomUUID();
       const now = new Date().toISOString();
       try {
@@ -695,6 +710,21 @@ export function openDatabase(dbPath: string) {
       const count = memberCount.get(conversationId) as { count: number };
       if (Number(count.count) >= 16) return false;
       insertMember.run(conversationId, userId, "member");
+      return true;
+    },
+    setChatHidden(conversationId: string, userId: string, hidden: boolean) {
+      if (!memberExists.get(conversationId, userId)) return false;
+      setHidden.run(hidden ? 1 : 0, conversationId, userId);
+      return true;
+    },
+    restoreChat(conversationId: string, userId: string) {
+      if (!memberExists.get(conversationId, userId)) return false;
+      restoreMembership.run(conversationId, userId);
+      return true;
+    },
+    removeDirectChat(conversationId: string, userId: string) {
+      if (kindOf(conversationId) !== "direct" || !memberExists.get(conversationId, userId)) return false;
+      setRemoved.run(1, conversationId, userId);
       return true;
     },
     removeMember(conversationId: string, userId: string) {

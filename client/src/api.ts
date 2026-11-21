@@ -54,6 +54,7 @@ export type Conversation = {
   lastMessageAt: string | null;
   unreadCount: number;
   peerLastReadAt: string | null;
+  hidden: boolean;
   peerOnline?: boolean;
   viewerRole: "admin" | "member" | null;
   peer: PublicUser | null;
@@ -148,6 +149,17 @@ export function listUsers() {
 
 export function listConversations() {
   return request<{ conversations: Conversation[] }>("/api/conversations");
+}
+
+export function setChatHidden(conversationId: string, hidden: boolean) {
+  return request<{ conversation: Conversation }>(`/api/conversations/${conversationId}/hidden`, {
+    method: "POST",
+    body: JSON.stringify({ hidden }),
+  });
+}
+
+export function removeChat(conversationId: string) {
+  return request<{ ok: boolean }>(`/api/conversations/${conversationId}`, { method: "DELETE" });
 }
 
 export function openConversation(username: string) {

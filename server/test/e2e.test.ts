@@ -596,3 +596,106 @@ test("changes a password without replacing encryption keys", async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("hides a chat for one person and removes it without taking it from the other", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "whisper-hide-"));
+  const started = await createServer({ dbPath: path.join(directory, "whisper.sqlite"), port: 0 });
+  const base = `http://127.0.0.1:${started.port}`;
+
+  try {
+    const aliceKeys = await generateIdentity();
+    const bobKeys = await generateIdentity();
+    const carolKeys = await generateIdentity();
+    const alice = await registerUser(base, "alice", "alice-password-1", aliceKeys);
+    const bob = await registerUser(base, "bob", "bob-password-22", bobKeys);
+    await registerUser(base, "carol", "carol-password-33", carolKeys);
+    const auth = (token: string) => ({ Authorization: `Bearer ${token}`, "Content-Type": "application/json" });
+
+    const opened = await fetch(`${base}/api/conversations`, {
+      method: "POST",
+      headers: auth(alice.token),
+      body: JSON.stringify({ username: "bob" }),
+    });
+    const openedBody = (await opened.json()) as { conversation: { id: string; hidden: boolean }; error?: string };
+    assert.equal(opened.status, 201, openedBody.error);
+    assert.equal(openedBody.conversation.hidden, false);
+    const conversationId = openedBody.conversation.id;
+
+    const hidden = await fetch(`${base}/api/conversations/${conversationId}/hidden`, {
+      method: "POST",
+      headers: auth(alice.token),
+      body: JSON.stringify({ hidden: true }),
+    });
+    const hiddenBody = (await hidden.json()) as { conversation: { hidden: boolean }; error?: string };
+    assert.equal(hidden.status, 200, hiddenBody.error);
+    assert.equal(hiddenBody.conversation.hidden, true);
+
+    const aliceList = await fetch(`${base}/api/conversations`, { headers: auth(alice.token) });
+    const aliceChats = (await aliceList.json()) as { conversations: Array<{ id: string; hidden: boolean }> };
+    assert.equal(aliceChats.conversations.find((chat) => chat.id === conversationId)?.hidden, true);
+    const bobList = await fetch(`${base}/api/conversations`, { headers: auth(bob.token) });
+    const bobChats = (await bobList.json()) as { conversations: Array<{ id: string; hidden: boolean }> };
+    assert.equal(bobChats.conversations.find((chat) => chat.id === conversationId)?.hidden, false);
+
+    const unhidden = await fetch(`${base}/api/conversations/${conversationId}/hidden`, {
+      method: "POST",
+      headers: auth(alice.token),
+      body: JSON.stringify({ hidden: false }),
+    });
+    assert.equal(unhidden.status, 200);
+    assert.equal(((await unhidden.json()) as { conversation: { hidden: boolean } }).conversation.hidden, false);
+
+    const removed = await fetch(`${base}/api/conversations/${conversationId}`, {
+      method: "DELETE",
+      headers: auth(alice.token),
+    });
+    assert.equal(removed.status, 200);
+    const afterRemove = (await (await fetch(`${base}/api/conversations`, { headers: auth(alice.token) })).json()) as {
+      conversations: Array<{ id: string }>;
+    };
+    assert.equal(afterRemove.conversations.some((chat) => chat.id === conversationId), false);
+    const bobStill = (await (await fetch(`${base}/api/conversations`, { headers: auth(bob.token) })).json()) as {
+      conversations: Array<{ id: string }>;
+    };
+    assert.equal(bobStill.conversations.some((chat) => chat.id === conversationId), true);
+
+    const again = await fetch(`${base}/api/conversations`, {
+      method: "POST",
+      headers: auth(alice.token),
+      body: JSON.stringify({ username: "bob" }),
+    });
+    const againBody = (await again.json()) as { conversation: { id: string; hidden: boolean }; error?: string };
+    assert.equal(again.status, 201, againBody.error);
+    assert.equal(againBody.conversation.id, conversationId);
+    assert.equal(againBody.conversation.hidden, false);
+
+    const created = await fetch(`${base}/api/groups`, {
+      method: "POST",
+      headers: auth(alice.token),
+      body: JSON.stringify({ title: "North gate", usernames: ["bob", "carol"] }),
+    });
+    const group = (await created.json()) as { conversation: { id: string }; error?: string };
+    assert.equal(created.status, 201, group.error);
+    const groupHidden = await fetch(`${base}/api/conversations/${group.conversation.id}/hidden`, {
+      method: "POST",
+      headers: auth(alice.token),
+      body: JSON.stringify({ hidden: true }),
+    });
+    assert.equal(groupHidden.status, 200);
+    const left = await fetch(`${base}/api/conversations/${group.conversation.id}`, { method: "DELETE", headers: auth(alice.token) });
+    assert.equal(left.status, 200);
+    const aliceAfter = (await (await fetch(`${base}/api/conversations`, { headers: auth(alice.token) })).json()) as {
+      conversations: Array<{ id: string }>;
+    };
+    assert.equal(aliceAfter.conversations.some((chat) => chat.id === group.conversation.id), false);
+    const bobGroup = (await (await fetch(`${base}/api/conversations`, { headers: auth(bob.token) })).json()) as {
+      conversations: Array<{ id: string; members: Array<{ username: string }> }>;
+    };
+    const kept = bobGroup.conversations.find((chat) => chat.id === group.conversation.id);
+    assert.ok(kept);
+    assert.equal(kept.members.some((member) => member.username === "alice"), false);
+  } finally {
+    await started.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

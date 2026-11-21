@@ -7,7 +7,11 @@ const config: CapacitorConfig = {
   server: {
     url: "https://whisperclient.up.railway.app",
     androidScheme: "https",
+    iosScheme: "https",
     allowNavigation: ["whisperclient.up.railway.app"],
+  },
+  ios: {
+    contentInset: "always",
   },
 };
 

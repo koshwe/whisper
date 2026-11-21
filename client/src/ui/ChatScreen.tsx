@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent, type MouseEvent } from "react";
 import { createPortal } from "react-dom";
 import {
   decryptFile,
@@ -30,6 +30,8 @@ import {
   listMessages,
   markRead,
   openConversation,
+  setChatHidden,
+  removeChat,
   resetKeys as resetKeysRequest,
   searchUsers,
   sendMessage,
@@ -47,6 +49,33 @@ import {
 } from "../api";
 import { saveIdentity } from "../idb";
 import { PhotoEditor } from "./PhotoEditor";
+
+type MenuPoint = { top: number; left: number };
+
+function fitMenu(anchor: DOMRect, menu: DOMRect, align: "left" | "right"): MenuPoint {
+  const margin = 8;
+  const gap = 4;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  let left = align === "right" ? anchor.right - menu.width : anchor.left;
+  const maxLeft = vw - margin - menu.width;
+  if (left > maxLeft) left = maxLeft;
+  if (left < margin) left = margin;
+  const belowTop = anchor.bottom + gap;
+  const aboveTop = anchor.top - gap - menu.height;
+  const fitsBelow = belowTop + menu.height <= vh - margin;
+  const fitsAbove = aboveTop >= margin;
+  let top = belowTop;
+  if (!fitsBelow && fitsAbove) top = aboveTop;
+  else if (!fitsBelow && !fitsAbove) {
+    const spaceBelow = vh - margin - belowTop;
+    const spaceAbove = anchor.top - gap - margin;
+    top = spaceAbove > spaceBelow ? margin : Math.max(margin, vh - margin - menu.height);
+  }
+  if (top < margin) top = margin;
+  if (top + menu.height > vh - margin) top = Math.max(margin, vh - margin - menu.height);
+  return { top: Math.round(top), left: Math.round(left) };
+}
 
 type SearchHit = {
   conversationId: string;
@@ -94,6 +123,49 @@ type ChatScreenProps = {
 };
 
 const REACTION_EMOJI = ["👍", "❤️", "😂", "😮", "😢", "🙏", "🔥", "🎉"];
+
+function SearchLine({
+  value,
+  onChange,
+  placeholder,
+  label,
+  phrase,
+  onPhrase,
+  className,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  label: string;
+  phrase: boolean;
+  onPhrase: () => void;
+  className?: string;
+}) {
+  return (
+    <div className={className ? `search-line ${className}` : "search-line"}>
+      <span className="search-field">
+        <input value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} aria-label={label} />
+        {value && (
+          <button
+            type="button"
+            className="search-clear"
+            aria-label={`Clear ${label}`}
+            onClick={(event) => {
+              onChange("");
+              const field = event.currentTarget.parentElement?.querySelector("input");
+              if (field instanceof HTMLInputElement) field.focus();
+            }}
+          >
+            ×
+          </button>
+        )}
+      </span>
+      <button type="button" className={phrase ? "phrase on" : "phrase"} aria-pressed={phrase} onClick={onPhrase}>
+        Search
+      </button>
+    </div>
+  );
+}
 
 function singleEmoji(value: string) {
   if (!value.trim() || typeof Intl.Segmenter !== "function") return "";
@@ -308,6 +380,33 @@ function postNotification(title: string, body: string, tag: string, onOpen: () =
   }
 }
 
+function playMessageSound() {
+  const AudioCtx = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioCtx) return;
+  try {
+    const context = new AudioCtx();
+    const now = context.currentTime;
+    const gain = context.createGain();
+    gain.connect(context.destination);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.07, now + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.34);
+    const tone = (frequency: number, start: number, stop: number) => {
+      const oscillator = context.createOscillator();
+      oscillator.type = "sine";
+      oscillator.frequency.value = frequency;
+      oscillator.connect(gain);
+      oscillator.start(start);
+      oscillator.stop(stop);
+    };
+    tone(880, now, now + 0.12);
+    tone(1175, now + 0.1, now + 0.32);
+    window.setTimeout(() => void context.close(), 500);
+  } catch {
+    // The browser blocks sound until the page has been used.
+  }
+}
+
 function pastedImage(data: DataTransfer | null) {
   if (!data) return null;
   for (const item of data.items) {
@@ -342,6 +441,13 @@ function formatBytes(size: number) {
 function isPreviewableImage(type: string) {
   return type === "image/jpeg" || type === "image/png" || type === "image/gif" || type === "image/webp";
 }
+
+type PhotoSlide = {
+  nonce: string;
+  conversationId: string;
+  file: AttachmentMeta;
+  localUrl?: string;
+};
 
 type ImageKind = "jpeg" | "png" | "gif" | "webp" | "heic";
 
@@ -540,13 +646,25 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
   const [chatSearching, setChatSearching] = useState(false);
   const [actionMenu, setActionMenu] = useState<string | null>(null);
   const [reactMenu, setReactMenu] = useState<string | null>(null);
+  const [actionBox, setActionBox] = useState<MenuPoint | null>(null);
+  const [reactBox, setReactBox] = useState<MenuPoint | null>(null);
+  const actionAnchorRef = useRef<HTMLButtonElement | null>(null);
+  const reactAnchorRef = useRef<HTMLButtonElement | null>(null);
+  const actionMenuRef = useRef<HTMLSpanElement | null>(null);
+  const reactMenuRef = useRef<HTMLSpanElement | null>(null);
   const [emojiPick, setEmojiPick] = useState("");
   const [emojiDraft, setEmojiDraft] = useState("");
   const [copiedNonce, setCopiedNonce] = useState<string | null>(null);
-  const [dialog, setDialog] = useState<null | "new" | "safety" | "profile" | "reset" | "password" | "forward" | "delete" | "group" | "people">(null);
+  const [dialog, setDialog] = useState<null | "new" | "safety" | "profile" | "reset" | "password" | "forward" | "delete" | "group" | "people" | "remove">(null);
+  const [photoGallery, setPhotoGallery] = useState<{ slides: PhotoSlide[]; index: number } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ChatMessage | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
+  const [showHidden, setShowHidden] = useState(false);
+  const [removeTarget, setRemoveTarget] = useState<Conversation | null>(null);
+  const [nameMenu, setNameMenu] = useState<{ conversationId: string; x: number; y: number } | null>(null);
+  const [removing, setRemoving] = useState(false);
+  const [removeError, setRemoveError] = useState("");
   const [openFolders, setOpenFolders] = useState<Record<string, boolean>>({});
   const [online, setOnline] = useState<Set<string>>(new Set());
   const [typing, setTyping] = useState<Record<string, string[]>>({});
@@ -582,6 +700,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
   const messagesRef = useRef(messages);
   const activeIdRef = useRef(activeId);
   const openChatRef = useRef<(conversationId: string) => void>(() => undefined);
+  const heardRef = useRef(new Set<string>());
   const identityRef = useRef(identity);
   const socketRef = useRef<WebSocket | null>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -768,6 +887,58 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     if (!el || !stickRef.current) return;
     el.scrollTop = el.scrollHeight;
   }, [activeMessages, activeId, typing]);
+
+  useLayoutEffect(() => {
+    if (!actionMenu) {
+      setActionBox(null);
+      return;
+    }
+    const place = () => {
+      const anchor = actionAnchorRef.current;
+      const menu = actionMenuRef.current;
+      if (!anchor || !menu) return;
+      const align = anchor.closest(".message-row")?.classList.contains("out") ? "right" : "left";
+      const next = fitMenu(anchor.getBoundingClientRect(), menu.getBoundingClientRect(), align);
+      setActionBox((current) => (current && current.top === next.top && current.left === next.left ? current : next));
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+  }, [actionMenu]);
+
+  useLayoutEffect(() => {
+    if (!reactMenu) {
+      setReactBox(null);
+      return;
+    }
+    const place = () => {
+      const anchor = reactAnchorRef.current;
+      const menu = reactMenuRef.current;
+      if (!anchor || !menu) return;
+      const align = anchor.closest(".message-row")?.classList.contains("out") ? "right" : "left";
+      const next = fitMenu(anchor.getBoundingClientRect(), menu.getBoundingClientRect(), align);
+      setReactBox((current) => (current && current.top === next.top && current.left === next.left ? current : next));
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+  }, [reactMenu, emojiPick]);
+
+  useEffect(() => {
+    if (!nameMenu) return;
+    const close = () => setNameMenu(null);
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setNameMenu(null);
+    };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, [nameMenu]);
 
   function sendSocket(payload: unknown) {
     if (socketRef.current?.readyState === WebSocket.OPEN) socketRef.current.send(JSON.stringify(payload));
@@ -995,14 +1166,68 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     });
     next.sort((a, b) => (b.lastMessageAt ?? b.createdAt).localeCompare(a.lastMessageAt ?? a.createdAt));
     replaceConversations(next);
-    if (!mine && !already && !viewing) {
-      const sender = personName(conversation, revealed.senderId, user.id);
-      const title = conversation.kind === "group" ? `${sender} in ${chatTitle(conversation)}` : chatTitle(conversation);
-      const body = revealed.failed ? "New message" : previewText(revealed).slice(0, 180) || "New message";
-      postNotification(title, body, event.message.conversationId, () => openChatRef.current(event.message.conversationId));
-    }
+    if (!mine && !already && !viewing) announceIncoming(event.message.id, conversation, revealed);
     if (!mine && viewing) void markRead(event.message.conversationId, event.message.id).catch(() => undefined);
   }
+
+  function announceIncoming(messageId: string, conversation: Conversation, revealed: ChatMessage) {
+    if (heardRef.current.has(messageId)) return;
+    heardRef.current.add(messageId);
+    if (heardRef.current.size > 80) {
+      const oldest = heardRef.current.values().next().value;
+      if (oldest) heardRef.current.delete(oldest);
+    }
+    playMessageSound();
+    const sender = personName(conversation, revealed.senderId, user.id);
+    const title = conversation.kind === "group" ? `${sender} in ${chatTitle(conversation)}` : chatTitle(conversation);
+    const body = revealed.failed ? "New message" : previewText(revealed).slice(0, 180) || "New message";
+    postNotification(title, body, conversation.id, () => openChatRef.current(conversation.id));
+  }
+
+  async function refreshLatest() {
+    try {
+      const { conversations: list } = await listConversations();
+      const prior = new Map(conversationsRef.current.map((item) => [item.id, item]));
+      for (const conversation of list) {
+        const last = conversation.lastMessage;
+        const previous = prior.get(conversation.id)?.lastMessage;
+        if (!last || (previous && (previous.id === last.id || previous.nonce === last.nonce))) continue;
+        const revealed = await revealMessage(last, conversation, identityRef.current, user.id);
+        setPreviews((current) => ({ ...current, [conversation.id]: previewText(revealed) }));
+        const viewing = activeIdRef.current === conversation.id && document.hasFocus();
+        if (loadedRef.current.has(conversation.id)) {
+          const page = await listMessages(conversation.id);
+          const incoming = await Promise.all(page.messages.map((message) => revealMessage(message, conversation, identityRef.current, user.id)));
+          const existing = messagesRef.current[conversation.id] ?? [];
+          const newcomers = incoming.filter((message) => message.senderId !== user.id && !existing.some((item) => item.nonce === message.nonce || item.id === message.id));
+          setHasMore((current) => ({ ...current, [conversation.id]: page.hasMore }));
+          setMessages((current) => {
+            let merged = current[conversation.id] ?? [];
+            for (const message of incoming) merged = mergeMessage(merged, message);
+            return { ...current, [conversation.id]: merged };
+          });
+          await showPins(conversation, page.pins ?? []);
+          if (viewing) noteRead(conversation.id, incoming);
+          else if (newcomers.length > 0) announceIncoming(newcomers[newcomers.length - 1].id, conversation, newcomers[newcomers.length - 1]);
+        } else if (!viewing && last.senderId !== user.id) {
+          announceIncoming(last.id, conversation, revealed);
+        }
+      }
+      const focused = document.hasFocus() ? activeIdRef.current : null;
+      const next = list.map((conversation) => (focused === conversation.id ? { ...conversation, unreadCount: 0 } : conversation));
+      next.sort((a, b) => (b.lastMessageAt ?? b.createdAt).localeCompare(a.lastMessageAt ?? a.createdAt));
+      replaceConversations(next);
+    } catch {
+      // The next minute tries again.
+    }
+  }
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void refreshLatest();
+    }, 60_000);
+    return () => window.clearInterval(timer);
+  }, [user.id]);
 
   async function ensureMessages(conversation: Conversation) {
     if (loadedRef.current.has(conversation.id)) return messagesRef.current[conversation.id] ?? [];
@@ -1043,13 +1268,21 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
 
   useEffect(() => {
     if (!actionMenu && !reactMenu) return;
-    const close = () => {
+    const close = (event?: Event) => {
+      if (event?.type === "scroll") {
+        const target = event.target;
+        if (target instanceof Node && (actionMenuRef.current?.contains(target) || reactMenuRef.current?.contains(target))) return;
+      }
       setActionMenu(null);
       setReactMenu(null);
       setEmojiPick("");
     };
     window.addEventListener("pointerdown", close);
-    return () => window.removeEventListener("pointerdown", close);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("scroll", close, true);
+    };
   }, [actionMenu, reactMenu]);
 
   function selectConversation(conversation: Conversation) {
@@ -1063,6 +1296,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     }
     stickRef.current = true;
     if (activeId) repliesRef.current[activeId] = replyTo;
+    if (conversation.hidden) setShowHidden(true);
     setActiveId(conversation.id);
     setDraft(draftsRef.current[conversation.id] ?? "");
     setReplyTo(repliesRef.current[conversation.id] ?? null);
@@ -2254,6 +2488,67 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     }
   }
 
+  function noteChatActionError(error: unknown, fallback: string) {
+    const message = error instanceof Error ? error.message : fallback;
+    const shown = message === "Request failed." ? "Restart the Whisper server, then try Hide or Remove again." : message;
+    setListError(shown);
+    setSendError(shown);
+  }
+
+  async function hideChat(conversation: Conversation, hidden: boolean) {
+    setListError("");
+    setSendError("");
+    try {
+      const { conversation: next } = await setChatHidden(conversation.id, hidden);
+      replaceConversations(conversationsRef.current.map((item) => (item.id === next.id ? next : item)));
+      if (hidden && activeIdRef.current === conversation.id) {
+        setActiveId(null);
+        setMobileThread(false);
+      }
+      if (!hidden) setShowHidden(false);
+    } catch (error) {
+      noteChatActionError(error, "Couldn't update that chat.");
+    }
+  }
+
+  function openNameMenu(event: MouseEvent, conversation: Conversation) {
+    event.preventDefault();
+    event.stopPropagation();
+    const left = Math.min(event.clientX, window.innerWidth - 168);
+    const top = Math.min(event.clientY, window.innerHeight - 96);
+    setNameMenu({ conversationId: conversation.id, x: Math.max(8, left), y: Math.max(8, top) });
+  }
+
+  function askRemove(conversation: Conversation) {
+    setRemoveTarget(conversation);
+    setRemoveError("");
+    setDialog("remove");
+  }
+
+  async function confirmRemoveChat() {
+    if (!removeTarget || removing) return;
+    setRemoving(true);
+    setRemoveError("");
+    try {
+      await removeChat(removeTarget.id);
+      replaceConversations(conversationsRef.current.filter((item) => item.id !== removeTarget.id));
+      if (activeIdRef.current === removeTarget.id) {
+        setActiveId(null);
+        setMobileThread(false);
+      }
+      setDialog(null);
+      setRemoveTarget(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Couldn't remove that chat.";
+      const shown = message === "Request failed." ? "Restart the Whisper server, then try Hide or Remove again." : message;
+      setRemoveError(shown);
+      setListError(shown);
+      setSendError(shown);
+    } finally {
+      setRemoving(false);
+    }
+  }
+
   async function openHit(hit: SearchHit) {
     const conversation = conversationsRef.current.find((item) => item.id === hit.conversationId);
     if (!conversation) return;
@@ -2306,7 +2601,14 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     let cancelled = false;
     const timer = window.setTimeout(() => {
       setSearching(true);
-      void searchConversations(conversationsRef.current, wordQuery, wordPhrase, identityRef.current, user.id, () => cancelled)
+      void searchConversations(
+        conversationsRef.current.filter((item) => !item.hidden),
+        wordQuery,
+        wordPhrase,
+        identityRef.current,
+        user.id,
+        () => cancelled,
+      )
         .then((found) => {
           if (!cancelled) {
             setHits(found);
@@ -2359,9 +2661,24 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
     };
   }, [chatQuery, chatPhrase, activeId, user.id]);
 
-  const visible = conversations.filter((conversation) => matchesChat(conversation, userQuery, userPhrase));
+  const hiddenChats = conversations.filter((conversation) => conversation.hidden);
+  const hiddenUnread = hiddenChats.reduce((sum, conversation) => sum + conversation.unreadCount, 0);
+  const visible = conversations.filter(
+    (conversation) => (showHidden ? conversation.hidden : !conversation.hidden) && matchesChat(conversation, userQuery, userPhrase),
+  );
   const userLookup = userQuery.trim();
   const wordLookup = wordQuery.trim();
+
+  function openPhoto(message: ChatMessage) {
+    if (!message.file || !isPreviewableImage(message.file.type)) return;
+    const slides = activeMessages.flatMap((item) =>
+      item.file && isPreviewableImage(item.file.type) && !item.failed
+        ? [{ nonce: item.nonce, conversationId: item.conversationId, file: item.file, localUrl: item.localUrl }]
+        : [],
+    );
+    const index = slides.findIndex((slide) => slide.nonce === message.nonce);
+    if (index >= 0) setPhotoGallery({ slides, index });
+  }
 
   return (
     <main className={mobileThread ? "app-shell thread-open" : "app-shell"}>
@@ -2379,40 +2696,57 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
           </button>
         </header>
         <div className="side-search">
-          <label className="search-line">
-            <input value={userQuery} onChange={(event) => setUserQuery(event.target.value)} placeholder="Name or username" aria-label="Name or username" />
-            <button type="button" className={userPhrase ? "phrase on" : "phrase"} aria-pressed={userPhrase} onClick={() => setUserPhrase((current) => !current)}>
-              Search
-            </button>
-          </label>
+          <SearchLine
+            value={userQuery}
+            onChange={setUserQuery}
+            placeholder="Name or username"
+            label="Name or username"
+            phrase={userPhrase}
+            onPhrase={() => setUserPhrase((current) => !current)}
+          />
         </div>
         {listError && <p className="error inset">{listError}</p>}
+        {(hiddenChats.length > 0 || showHidden) && (
+          <button
+            type="button"
+            className={showHidden ? "phrase on hidden-toggle" : "phrase hidden-toggle"}
+            aria-pressed={showHidden}
+            onClick={() => setShowHidden((current) => !current)}
+          >
+            {showHidden ? "All chats" : `Hidden${hiddenUnread > 0 ? ` · ${hiddenUnread}` : ""}`}
+          </button>
+        )}
         <div className="chat-list">
-          {!userLookup && visible.length === 0 && <p className="empty-list">No chats yet. Start one with a username.</p>}
+          {!userLookup && visible.length === 0 && (
+            <p className="empty-list">
+              {showHidden ? "No hidden chats." : hiddenChats.length > 0 ? "Every chat is hidden." : "No chats yet. Start one with a username."}
+            </p>
+          )}
           {userLookup && visible.length === 0 && <p className="empty-list">No users match that search.</p>}
           {visible.map((conversation) => {
             const title = chatTitle(conversation);
             const group = conversation.kind === "group";
             const someoneTyping = (typing[conversation.id]?.length ?? 0) > 0;
             return (
-            <button
-              type="button"
-              key={conversation.id}
-              className={conversation.id === activeId ? "chat-row active" : "chat-row"}
-              onClick={() => selectConversation(conversation)}
-            >
-              <Avatar name={title} username={group ? conversation.id : conversation.peer?.username || title} online={!group && conversation.peer ? online.has(conversation.peer.id) : false} />
-              <span className="chat-copy">
-                <span className="chat-topline">
-                  <strong>{title}</strong>
-                  {conversation.lastMessageAt && <time>{formatListTime(conversation.lastMessageAt)}</time>}
+            <div key={conversation.id} className={conversation.id === activeId ? "chat-item active" : "chat-item"}>
+              <button
+                type="button"
+                className="chat-row"
+                onClick={() => selectConversation(conversation)}
+              >
+                <Avatar name={title} username={group ? conversation.id : conversation.peer?.username || title} online={!group && conversation.peer ? online.has(conversation.peer.id) : false} />
+                <span className="chat-copy">
+                  <span className="chat-topline">
+                    <strong onContextMenu={(event) => openNameMenu(event, conversation)}>{title}</strong>
+                    {conversation.lastMessageAt && <time>{formatListTime(conversation.lastMessageAt)}</time>}
+                  </span>
+                  <span className="chat-bottom">
+                    <em>{someoneTyping ? "typing…" : previews[conversation.id] || "Encrypted chat"}</em>
+                    {conversation.unreadCount > 0 && <span className="unread">{conversation.unreadCount}</span>}
+                  </span>
                 </span>
-                <span className="chat-bottom">
-                  <em>{someoneTyping ? "typing…" : previews[conversation.id] || "Encrypted chat"}</em>
-                  {conversation.unreadCount > 0 && <span className="unread">{conversation.unreadCount}</span>}
-                </span>
-              </span>
-            </button>
+              </button>
+            </div>
             );
           })}
         </div>
@@ -2421,28 +2755,39 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
         {active ? (
           <>
             <header className="thread-head">
-              <button type="button" className="back" onClick={() => setMobileThread(false)} aria-label="Back to chats">
-                ←
-              </button>
-              <Avatar
-                name={chatTitle(active)}
-                username={active.kind === "group" ? active.id : active.peer?.username || chatTitle(active)}
-                online={active.kind !== "group" && active.peer ? online.has(active.peer.id) : false}
+              <div className="thread-who">
+                <button type="button" className="back" onClick={() => setMobileThread(false)} aria-label="Back to chats">
+                  ←
+                </button>
+                <Avatar
+                  name={chatTitle(active)}
+                  username={active.kind === "group" ? active.id : active.peer?.username || chatTitle(active)}
+                  online={active.kind !== "group" && active.peer ? online.has(active.peer.id) : false}
+                />
+                <span>
+                  <strong onContextMenu={(event) => openNameMenu(event, active)}>{chatTitle(active)}</strong>
+                  <small>
+                    {(typing[active.id]?.length ?? 0) > 0
+                      ? active.kind === "group"
+                        ? `${(typing[active.id] ?? []).map((id) => personName(active, id, user.id)).filter((name) => name !== "You").join(", ") || "Someone"} typing…`
+                        : "typing…"
+                      : active.kind === "group"
+                        ? `${active.members.length + 1} people · encrypted`
+                        : active.peer && online.has(active.peer.id)
+                          ? "Online · encrypted"
+                          : "Encrypted"}
+                  </small>
+                </span>
+              </div>
+              <SearchLine
+                className="head-search"
+                value={chatQuery}
+                onChange={setChatQuery}
+                placeholder="Search this chat"
+                label="Search this chat"
+                phrase={chatPhrase}
+                onPhrase={() => setChatPhrase((current) => !current)}
               />
-              <span>
-                <strong>{chatTitle(active)}</strong>
-                <small>
-                  {(typing[active.id]?.length ?? 0) > 0
-                    ? active.kind === "group"
-                      ? `${(typing[active.id] ?? []).map((id) => personName(active, id, user.id)).filter((name) => name !== "You").join(", ") || "Someone"} typing…`
-                      : "typing…"
-                    : active.kind === "group"
-                      ? `${active.members.length + 1} people · encrypted`
-                      : active.peer && online.has(active.peer.id)
-                        ? "Online · encrypted"
-                        : "Encrypted"}
-                </small>
-              </span>
               {active.kind === "group" ? (
                 <button
                   type="button"
@@ -2462,8 +2807,8 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                 </button>
               )}
             </header>
-            <div className="chat-search">
-              {chatQuery.trim() && (
+            {chatQuery.trim() && (
+              <div className="chat-search">
                 <div className="word-hits">
                   {chatSearching && <p className="empty-list">Searching this chat…</p>}
                   {chatHits.map((hit) => (
@@ -2475,14 +2820,8 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                   ))}
                   {!chatSearching && chatHits.length === 0 && <p className="empty-list">No messages in this chat match that search.</p>}
                 </div>
-              )}
-              <label className="search-line">
-                <input value={chatQuery} onChange={(event) => setChatQuery(event.target.value)} placeholder="Search this chat" aria-label="Search this chat" />
-                <button type="button" className={chatPhrase ? "phrase on" : "phrase"} aria-pressed={chatPhrase} onClick={() => setChatPhrase((current) => !current)}>
-                  Search
-                </button>
-              </label>
-            </div>
+              </div>
+            )}
             {(pins[active.id] ?? []).length > 0 && (
               <div className="pin-bar" aria-label="Pinned messages">
                 <p className="pin-count">Pinned {(pins[active.id] ?? []).length}/5</p>
@@ -2525,7 +2864,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
               {(() => {
                 const byNonce = new Map(activeMessages.map((item) => [item.nonce, item]));
                 const visible = activeMessages.filter((item) => collectorNonce(item, byNonce) === null);
-                const renderBubble = (message: ChatMessage, nested: boolean, menuUp: boolean) => {
+                const renderBubble = (message: ChatMessage, nested: boolean) => {
                   const mine = message.senderId === user.id;
                   const read = Boolean(active.peerLastReadAt && message.createdAt <= active.peerLastReadAt);
                   const canAct = !message.failed && Boolean(message.text.trim() || message.file);
@@ -2562,7 +2901,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                     )}
                     <article
                       id={`msg-${message.nonce}`}
-                      className={`message-row ${mine ? "out" : "in"}${message.id === editingId ? " editing" : ""}${menuUp ? " menu-up" : ""}`}
+                      className={`message-row ${mine ? "out" : "in"}${message.id === editingId ? " editing" : ""}`}
                       onContextMenu={(event) => {
                         if (!canSelect(message)) return;
                         event.preventDefault();
@@ -2603,7 +2942,12 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                             </button>
                           )}
                           {message.file && (
-                            <AttachmentCard conversationId={message.conversationId} file={message.file} localUrl={message.localUrl} />
+                            <AttachmentCard
+                              conversationId={message.conversationId}
+                              file={message.file}
+                              localUrl={message.localUrl}
+                              onOpen={isPreviewableImage(message.file.type) ? () => openPhoto(message) : undefined}
+                            />
                           )}
                           {message.text && <p>{message.text}</p>}
                         </>
@@ -2616,15 +2960,23 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                             className="dots"
                             aria-label="Message actions"
                             aria-expanded={actionMenu === message.nonce}
-                            onClick={() => {
+                            onClick={(event) => {
                               setReactMenu(null);
+                              setEmojiPick("");
+                              actionAnchorRef.current = event.currentTarget;
                               setActionMenu((current) => (current === message.nonce ? null : message.nonce));
                             }}
                           >
                             <DotsGlyph />
                           </button>
-                          {actionMenu === message.nonce && (
-                        <span className="bubble-actions" role="menu">
+                          {actionMenu === message.nonce && createPortal(
+                        <span
+                          className={actionBox ? "bubble-actions placed" : "bubble-actions"}
+                          role="menu"
+                          ref={actionMenuRef}
+                          style={actionBox ? { top: actionBox.top, left: actionBox.left } : undefined}
+                          onPointerDown={(event) => event.stopPropagation()}
+                        >
                           {!message.failed && Boolean(message.text.trim() || message.file) && (
                                 <button type="button" role="menuitem" onClick={() => void copyMessage(message)}>Copy</button>
                               )}
@@ -2653,7 +3005,8 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                               {canDelete && (
                                 <button type="button" role="menuitem" className="danger" onClick={() => { setActionMenu(null); beginDelete(message); }}>Delete</button>
                               )}
-                            </span>
+                            </span>,
+                        document.body,
                           )}
                         </span>
                       )}
@@ -2676,8 +3029,8 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                           {open && (
                             <div className="folder-replies">
                               {gathered.length === 0 && <p className="folder-empty">Replies will gather here.</p>}
-                              {gathered.map((reply, replyIndex) => (
-                                <Fragment key={reply.nonce}>{renderBubble(reply, true, menuUp && replyIndex === gathered.length - 1)}</Fragment>
+                              {gathered.map((reply) => (
+                                <Fragment key={reply.nonce}>{renderBubble(reply, true)}</Fragment>
                               ))}
                             </div>
                           )}
@@ -2711,15 +3064,21 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                             className="react-open"
                             aria-label="React"
                             aria-expanded={reactMenu === message.nonce}
-                            onClick={() => {
+                            onClick={(event) => {
                               setActionMenu(null);
+                              reactAnchorRef.current = event.currentTarget;
                               setReactMenu((current) => (current === message.nonce ? null : message.nonce));
                             }}
                           >
                             ☺
                           </button>
-                          {reactMenu === message.nonce && (
-                            <span className="react-row">
+                          {reactMenu === message.nonce && createPortal(
+                            <span
+                              className={reactBox ? "react-row placed" : "react-row"}
+                              ref={reactMenuRef}
+                              style={reactBox ? { top: reactBox.top, left: reactBox.left } : undefined}
+                              onPointerDown={(event) => event.stopPropagation()}
+                            >
                               {REACTION_EMOJI.map((emoji) => (
                                 <button
                                   type="button"
@@ -2760,7 +3119,8 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                                   }}
                                 />
                               )}
-                            </span>
+                            </span>,
+                            document.body,
                           )}
                         </span>
                       )}
@@ -2776,7 +3136,6 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                   if (!last || last.key !== key) groups.push({ key, label: dayLabel(message.createdAt), messages: [message] });
                   else last.messages.push(message);
                 }
-                const lastNonce = visible[visible.length - 1]?.nonce;
                 return groups.map((group) => {
                   const today = group.key === todayKey;
                   const open = today || Boolean(openDays[`${active.id}:${group.key}`]);
@@ -2799,7 +3158,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                           <span className="day-count">{group.messages.length === 1 ? "1 message" : `${group.messages.length} messages`}</span>
                         </button>
                       )}
-                      {open && group.messages.map((message) => renderBubble(message, false, message.nonce === lastNonce))}
+                      {open && group.messages.map((message) => renderBubble(message, false))}
                     </Fragment>
                   );
                 });
@@ -2964,13 +3323,14 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
             {!searching && hits.length === 0 && <p className="empty-list">No messages match that search.</p>}
           </div>
         )}
-        <label className="search-line">
-          <span className="sr">Search all chats</span>
-          <input value={wordQuery} onChange={(event) => setWordQuery(event.target.value)} placeholder="Search all chats" aria-label="Search all chats" />
-          <button type="button" className={wordPhrase ? "phrase on" : "phrase"} aria-pressed={wordPhrase} onClick={() => setWordPhrase((current) => !current)}>
-            Search
-          </button>
-        </label>
+        <SearchLine
+          value={wordQuery}
+          onChange={setWordQuery}
+          placeholder="Search all chats"
+          label="Search all chats"
+          phrase={wordPhrase}
+          onPhrase={() => setWordPhrase((current) => !current)}
+        />
       </div>}
       {dialog && (
         <div className="dialog-backdrop" onMouseDown={() => setDialog(null)}>
@@ -3017,7 +3377,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                 </label>
                 <div className="forward-list">
                   {conversations
-                    .filter((conversation) => matchesChat(conversation, forwardLookup))
+                    .filter((conversation) => !conversation.hidden && matchesChat(conversation, forwardLookup))
                     .map((conversation) => {
                       const title = chatTitle(conversation);
                       const group = conversation.kind === "group";
@@ -3043,6 +3403,20 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                   {forwarding ? "Forwarding…" : "Forward to username"}
                 </button>
               </form>
+            )}
+            {dialog === "remove" && removeTarget && (
+              <div>
+                <h2>Remove chat</h2>
+                <p className="hint">
+                  {removeTarget.kind === "group"
+                    ? `Remove ${chatTitle(removeTarget)}? You leave the group. Everyone else keeps it.`
+                    : `Remove ${chatTitle(removeTarget)} from your chats? They keep the conversation. Start it again with their username.`}
+                </p>
+                {removeError && <p className="error">{removeError}</p>}
+                <button className="primary" type="button" disabled={removing} onClick={() => void confirmRemoveChat()}>
+                  {removing ? "Removing…" : "Remove"}
+                </button>
+              </div>
             )}
             {dialog === "delete" && deleteTarget && (
               <div>
@@ -3163,7 +3537,7 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
                     ? "Turn off message notifications"
                     : "Turn on message notifications"}
                 </button>
-                <p className="hint">A notice appears on this device when a new message arrives and that chat is not open. The text is decrypted here first.</p>
+                <p className="hint">A sound plays when a new message arrives and that chat is not open. A notice appears too after notifications are on. Chats refresh every minute.</p>
                 {notifyError && <p className="error">{notifyError}</p>}
                 <button type="button" className="text" onClick={() => setShowFingerprint((current) => !current)}>
                   {showFingerprint ? "Hide key fingerprint" : "Show key fingerprint"}
@@ -3243,6 +3617,41 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
           </div>
         </div>
       )}
+      {nameMenu && (() => {
+        const conversation = conversations.find((item) => item.id === nameMenu.conversationId);
+        if (!conversation) return null;
+        return createPortal(
+          <div
+            className="name-menu"
+            role="menu"
+            style={{ left: nameMenu.x, top: nameMenu.y }}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setNameMenu(null);
+                void hideChat(conversation, !conversation.hidden);
+              }}
+            >
+              {conversation.hidden ? "Unhide" : "Hide"}
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="danger"
+              onClick={() => {
+                setNameMenu(null);
+                askRemove(conversation);
+              }}
+            >
+              Remove
+            </button>
+          </div>,
+          document.body,
+        );
+      })()}
       {photoFile && (
         <PhotoEditor
           file={photoFile}
@@ -3251,6 +3660,14 @@ export function ChatScreen({ user, identity, onLogout, onAccount }: ChatScreenPr
             setPhotoFile(null);
             attachReady(next);
           }}
+        />
+      )}
+      {photoGallery && (
+        <PhotoViewer
+          slides={photoGallery.slides}
+          index={photoGallery.index}
+          onIndex={(index) => setPhotoGallery((current) => (current ? { ...current, index } : current))}
+          onClose={() => setPhotoGallery(null)}
         />
       )}
     </main>
@@ -3405,16 +3822,117 @@ function Paperclip() {
   );
 }
 
-function AttachmentCard({ conversationId, file, localUrl }: { conversationId: string; file: AttachmentMeta; localUrl?: string }) {
-  if (file.voice) return <VoiceNote conversationId={conversationId} file={file} localUrl={localUrl} />;
-  return <FileAttachment conversationId={conversationId} file={file} localUrl={localUrl} />;
+function PhotoViewer({
+  slides,
+  index,
+  onIndex,
+  onClose,
+}: {
+  slides: PhotoSlide[];
+  index: number;
+  onIndex: (index: number) => void;
+  onClose: () => void;
+}) {
+  const slide = slides[index];
+  const [url, setUrl] = useState<string | null>(slide?.localUrl ?? null);
+  const [failed, setFailed] = useState(false);
+  const owned = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!slide) return;
+    if (slide.localUrl) {
+      setUrl(slide.localUrl);
+      setFailed(false);
+      return;
+    }
+    let cancelled = false;
+    setUrl(null);
+    setFailed(false);
+    decryptAttachment(slide.conversationId, slide.file)
+      .then((bytes) => {
+        if (cancelled) return;
+        const copy = new Uint8Array(bytes.byteLength);
+        copy.set(bytes);
+        const next = URL.createObjectURL(new Blob([copy.buffer], { type: slide.file.type }));
+        owned.current = next;
+        setUrl(next);
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      });
+    return () => {
+      cancelled = true;
+      if (owned.current) {
+        URL.revokeObjectURL(owned.current);
+        owned.current = null;
+      }
+    };
+  }, [slide]);
+
+  useEffect(() => {
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (event.key === "ArrowLeft" && index > 0) {
+        event.preventDefault();
+        onIndex(index - 1);
+        return;
+      }
+      if (event.key === "ArrowRight" && index < slides.length - 1) {
+        event.preventDefault();
+        onIndex(index + 1);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [index, onClose, onIndex, slides.length]);
+
+  if (!slide) return null;
+  return createPortal(
+    <div className="photo-viewer" role="dialog" aria-modal="true" aria-label="Photo" onMouseDown={onClose}>
+      <div className="photo-viewer-frame" onMouseDown={(event) => event.stopPropagation()}>
+        <button type="button" className="photo-viewer-close" onClick={onClose}>
+          Close
+        </button>
+        {url ? <img src={url} alt="Photo" /> : <p className="photo-viewer-status">{failed ? "Couldn't open this photo." : "Opening photo…"}</p>}
+      </div>
+    </div>,
+    document.body,
+  );
 }
 
-function FileAttachment({ conversationId, file, localUrl }: { conversationId: string; file: AttachmentMeta; localUrl?: string }) {
+function AttachmentCard({
+  conversationId,
+  file,
+  localUrl,
+  onOpen,
+}: {
+  conversationId: string;
+  file: AttachmentMeta;
+  localUrl?: string;
+  onOpen?: () => void;
+}) {
+  if (file.voice) return <VoiceNote conversationId={conversationId} file={file} localUrl={localUrl} />;
+  return <FileAttachment conversationId={conversationId} file={file} localUrl={localUrl} onOpen={onOpen} />;
+}
+
+function FileAttachment({
+  conversationId,
+  file,
+  localUrl,
+  onOpen,
+}: {
+  conversationId: string;
+  file: AttachmentMeta;
+  localUrl?: string;
+  onOpen?: () => void;
+}) {
   const [url, setUrl] = useState<string | null>(localUrl ?? null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [viewer, setViewer] = useState(false);
   const owned = useRef<string | null>(null);
   const image = isPreviewableImage(file.type);
 
@@ -3438,15 +3956,6 @@ function FileAttachment({ conversationId, file, localUrl }: { conversationId: st
       if (owned.current) URL.revokeObjectURL(owned.current);
     };
   }, [conversationId, file, image, localUrl]);
-
-  useEffect(() => {
-    if (!viewer) return;
-    const onKey = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") setViewer(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [viewer]);
 
   async function download() {
     setBusy(true);
@@ -3482,25 +3991,11 @@ function FileAttachment({ conversationId, file, localUrl }: { conversationId: st
           aria-label="View photo"
           onClick={(event) => {
             event.stopPropagation();
-            setViewer(true);
+            onOpen?.();
           }}
         >
           <img src={url} alt="Photo" />
         </button>
-      )}
-      {viewer && url && createPortal(
-        <div className="photo-viewer" role="dialog" aria-modal="true" aria-label="Photo" onMouseDown={() => setViewer(false)}>
-          <button
-            type="button"
-            className="photo-viewer-close"
-            onMouseDown={(event) => event.stopPropagation()}
-            onClick={() => setViewer(false)}
-          >
-            Close
-          </button>
-          <img src={url} alt="Photo" onMouseDown={(event) => event.stopPropagation()} />
-        </div>,
-        document.body,
       )}
       <div className="file-card">
         <span>

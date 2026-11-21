@@ -47,7 +47,7 @@ Each account has an encryption key pair and a signing key pair, generated in the
 - A group chat encrypts each message separately for every current member, up to 16 people. The person who starts the group is its admin and can add or remove people later. The server stores those copies and cannot read them. Someone who joins later does not receive older messages. The group name is visible to the server, the same way usernames are.
 - The sender signs the ciphertext. The recipient checks that signature before showing the text.
 - The conversation header shows a safety number. Compare it with the other person on a call or in person.
-- Message notifications are created on this device after the message is decrypted. Turn them on from the profile menu. They appear when that chat is not the open window. The server does not receive the notice text.
+- Message notifications are created on this device after the message is decrypted. Turn them on from the profile menu. They appear when that chat is not the open window, with a short sound. The chat list also refreshes every minute. The server does not receive the notice text.
 
 The server checks signatures so it can reject forged ciphertext. It does not have the private keys, so it cannot read the message text.
 
@@ -56,3 +56,17 @@ The server can still see account names, who talks to whom, timestamps, and the s
 If someone later copies a recipient's private key, they can decrypt messages sent to that key. Replacing your keys from the profile menu starts a new key pair; older messages stay unreadable.
 
 A web app can only be end-to-end encrypted if the page you load is the real Whisper code. Use it on a machine and origin you trust.
+
+## iPhone
+
+The iOS app lives in `client/ios`. It is the same Capacitor shell as the Android app and opens `https://whisperclient.up.railway.app`.
+
+Build it on a Mac with Xcode:
+
+```bash
+cd client
+npm install
+npx cap sync ios
+```
+
+Open `client/ios/App/App.xcodeproj`, choose your Apple team under Signing, then run Whisper on a simulator or an iPhone. The app asks for the microphone when you record a voice message, and for the camera or photo library when you attach a picture.
